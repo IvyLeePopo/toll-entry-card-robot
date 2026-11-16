@@ -156,6 +156,19 @@ void SimDevice::handle(int cmd, const QByteArray &p)
             simulateCarLeft(true);
         else if (act == DBG_CAR_LEAVE_NO)
             simulateCarLeft(false);
+        else if (act == DBG_LANE_CLEAR)
+        {
+            // 故障恢复用: 强制造一个"车道已清空"的现场
+            // 脏点: 真机上这一步是人工确认后按的"车道复位", 这里一并把卡也丢了
+            qDebug() << "[SIM] force clear lane";
+            m_carPresent = false;
+            m_cardInSlot = false;
+            m_cardWritten = false;
+            m_slot = SLOT_IN;
+            m_devState = DEV_IDLE;
+            m_err = 0;
+            pushStatus();
+        }
         else
             qDebug() << "[SIM] unknown debug action" << act;
         return;

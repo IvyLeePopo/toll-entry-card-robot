@@ -13,5 +13,7 @@ QString resText(int r)
         return QString::fromUtf8("超时未取");
     if (r == RES_NO_CARD)
         return QString::fromUtf8("卡箱无卡");
+    if (r == RES_ABORTED)
+        return QString::fromUtf8("已中止");
     return QString::fromUtf8("未知(%1)").arg(r);
 }

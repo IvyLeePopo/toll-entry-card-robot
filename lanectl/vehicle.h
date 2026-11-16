@@ -42,6 +42,7 @@ struct VehicleRecord
 #define RES_RECYCLED    2
 #define RES_TIMEOUT     3
 #define RES_NO_CARD     4
+#define RES_ABORTED     5
 
 QString resText(int r);
 

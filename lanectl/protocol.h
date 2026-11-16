@@ -40,6 +40,7 @@
 #define DBG_CAR_TAKE       2      // 司机取卡
 #define DBG_CAR_LEAVE      3      // 车辆驶离
 #define DBG_CAR_LEAVE_NO   4      // 未取卡驶离
+#define DBG_LANE_CLEAR     5      // 清空车道 (故障恢复时用)
 
 // ------------------------- 下位机 -> 上位机 -------------------------
 #define CMD_ACK            0x80   // [1B 结果码]

@@ -99,6 +99,7 @@ LaneWindow::LaneWindow(QWidget *parent)
     m_slotPos = -1;
     m_vehKind = 0;
     m_barrierUp = false;
+    m_recovering = false;
 
     buildUi();
 
@@ -125,6 +126,7 @@ LaneWindow::LaneWindow(QWidget *parent)
     connect(m_bDown, SIGNAL(clicked()), this, SLOT(onManualBarrierDown()));
     connect(m_bReset, SIGNAL(clicked()), this, SLOT(onResetDev()));
     connect(m_bClear, SIGNAL(clicked()), this, SLOT(onClearFlow()));
+    connect(m_bRecover, SIGNAL(clicked()), this, SLOT(onRecoverFault()));
 
     connect(m_bSimCar, SIGNAL(clicked()), this, SLOT(onSimCarArrive()));
     connect(m_bSimTake, SIGNAL(clicked()), this, SLOT(onSimTakeCard()));
@@ -333,7 +335,12 @@ void LaneWindow::buildUi()
     mg->addWidget(m_bReset, 4, 1);
     mg->addWidget(m_bClear, 5, 0, 1, 2);
 
-    mg->setRowStretch(6, 1);
+    m_bRecover = new QPushButton(QString::fromUtf8("故障恢复 / 跳过本车"));
+    m_bRecover->setStyleSheet("font-weight:bold; color:#c00;");
+    m_bRecover->setMinimumHeight(32);
+    mg->addWidget(m_bRecover, 6, 0, 1, 2);
+
+    mg->setRowStretch(7, 1);
 
     // ---- 模拟现场 (录 demo / 单机联调用) ----
     QGroupBox *simBox = new QGroupBox(QString::fromUtf8("模拟现场 (只对 LaneSim 有效)"));
@@ -845,6 +852,13 @@ void LaneWindow::onEvent(int ev, int param)
     else if (ev == EV_RECYCLED)
     {
         m_cmdTimer->stop();
+
+        if (m_recovering)
+        {
+            finishRecover();
+            return;
+        }
+
         if (m_retry > 0 && m_cur.result == RES_RUNNING)
         {
             log(QString::fromUtf8("废卡已回收, 重新备卡"));
@@ -911,6 +925,17 @@ void LaneWindow::onEvent(int ev, int param)
     {
         m_cmdTimer->stop();
         log(QString::fromUtf8("设备复位完成"));
+
+        if (m_recovering)
+        {
+            // 第二步: 把可能夹在机构里的卡回收掉 (没卡时设备会拒收, 属正常)
+            log(QString::fromUtf8("回收残留卡片..."));
+            sendCmd(CMD_RECYCLE_CARD, QByteArray(1, (char)RECYCLE_MANUAL));
+            // 脏点: 没有卡就没有 EV_RECYCLED, 只能靠固定延时兜底
+            QTimer::singleShot(1500, this, [this]() { finishRecover(); });
+            return;
+        }
+
         setState(LS_IDLE);
         updateHead();
     }
@@ -993,9 +1018,51 @@ void LaneWindow::enterFault(int rc, const QString &what)
     showScreen(QString::fromUtf8("设备故障，请联系工作人员"));
     log(QString::fromUtf8("!! %1: %2").arg(what).arg(rcText(rc)));
 
-    // 脏点: 故障也记成"已回收", 因为懒得多写一种流水结果
-    finishVehicle(RES_RECYCLED, what);
+    // 本车按"已中止"记一笔 (旧版记成"已回收", 其实卡还在机构里)
+    finishVehicle(RES_ABORTED, what);
+    log(QString::fromUtf8("处理完现场后点[故障恢复 / 跳过本车], 否则下一辆车发不出去"));
     updateHead();
+}
+
+void LaneWindow::finishRecover()
+{
+    if (!m_recovering)
+        return;             // EV_RECYCLED 和兜底定时器只认第一个
+
+    m_recovering = false;
+
+    // 脏点: 车道清空靠一条调试命令, 真机上是人工确认后按"车道复位"
+    if (m_sock->state() == QAbstractSocket::ConnectedState)
+        sendFire(CMD_DEBUG, QByteArray(1, (char)DBG_LANE_CLEAR));
+
+    m_cmdTimer->stop();
+    m_takeTimer->stop();
+    m_carPresent = false;
+    m_retry = 0;
+    m_voiceCount = 0;
+    m_errCode = 0;
+    m_devState = DEV_IDLE;
+    m_slotPos = SLOT_IN;
+
+    if (m_barrierUp)
+    {
+        sendFire(CMD_BARRIER, QByteArray(1, (char)0));
+        m_barrierUp = false;
+    }
+
+    // 还在跑的车按"已中止"落一条流水, 不留半截
+    finishVehicle(RES_ABORTED, QString::fromUtf8("故障恢复, 本车中止"));
+
+    m_cur = VehicleRecord();
+    setState(LS_IDLE);
+    showScreen(QString::fromUtf8("欢迎光临"));
+    m_alarmLbl->setText(QString::fromUtf8("已恢复, 可接待下一辆车"));
+    m_alarmLbl->setStyleSheet("color:#0a0;");
+    updateVehiclePanel();
+    updateLaneView();
+    updateHead();
+
+    log(QString::fromUtf8("故障恢复完成, 车道已清空"));
 }
 
 void LaneWindow::showScreen(const QString &text)
@@ -1133,6 +1200,27 @@ void LaneWindow::onResetDev()
     updateHead();
 }
 
+void LaneWindow::onRecoverFault()
+{
+    if (m_sock->state() != QAbstractSocket::ConnectedState)
+    {
+        log(QString::fromUtf8("未连接设备, 无法恢复"));
+        return;
+    }
+    if (m_recovering)
+    {
+        log(QString::fromUtf8("正在恢复中, 请稍等"));
+        return;
+    }
+
+    m_recovering = true;
+    m_cmdTimer->stop();
+    m_takeTimer->stop();
+
+    log(QString::fromUtf8("开始故障恢复: 设备复位 -> 回收残留卡 -> 清空车道"));
+    sendCmd(CMD_RESET, QByteArray());
+}
+
 void LaneWindow::onClearFlow()
 {
     // 脏点: 正在处理的那辆车能被清掉, 流水号和界面就对不上了
@@ -1150,6 +1238,16 @@ void LaneWindow::onClearFlow()
 
 void LaneWindow::onSimCarArrive()
 {
+    if (m_state == LS_FAULT)
+    {
+        log(QString::fromUtf8("设备还在故障态, 先点[故障恢复 / 跳过本车]"));
+        return;
+    }
+    if (m_carPresent)
+    {
+        log(QString::fromUtf8("车道里还有车, 先点[模拟驶离]或[故障恢复 / 跳过本车]"));
+        return;
+    }
     sendDebug(DBG_CAR_ARRIVE);
 }
 

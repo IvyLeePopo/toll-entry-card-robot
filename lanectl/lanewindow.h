@@ -81,6 +81,7 @@ private slots:
     void onManualBarrierDown();
     void onResetDev();
     void onClearFlow();
+    void onRecoverFault();
 
     // ---- 模拟现场 (只对 LaneSim 有效) ----
     void onSimCarArrive();
@@ -110,6 +111,7 @@ private:
     void doRecycle(int reason);
     void finishVehicle(int result, const QString &remark);
     void enterFault(int rc, const QString &what);
+    void finishRecover();
     void showScreen(const QString &text);
     void playVoice(int id);
     void setState(int st);
@@ -164,6 +166,7 @@ private:
     QPushButton *m_bDown;
     QPushButton *m_bReset;
     QPushButton *m_bClear;
+    QPushButton *m_bRecover;
     QPushButton *m_bSimCar;
     QPushButton *m_bSimTake;
     QPushButton *m_bSimLeave;
@@ -177,6 +180,7 @@ private:
     int m_voiceCount;          // 已播报"请取卡"次数
     bool m_carPresent;
     bool m_barrierUp;
+    bool m_recovering;
 
     int m_devState;
     int m_binLeft;

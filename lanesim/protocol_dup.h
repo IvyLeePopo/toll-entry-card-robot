@@ -34,6 +34,7 @@
 #define DBG_CAR_TAKE       2
 #define DBG_CAR_LEAVE      3
 #define DBG_CAR_LEAVE_NO   4
+#define DBG_LANE_CLEAR     5
 
 #define CMD_ACK            0x80
 #define CMD_STATUS         0x81
