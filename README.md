@@ -294,7 +294,7 @@ Select-String -Path lanectl\*.cpp,lanectl\*.h,lanesim\*.cpp,lanesim\*.h -Pattern
 
 | 项 | 结果 |
 |---|---|
-| `lane_core_test` | 19 项全过：1000 任务 2ms、峰值并发 4、异常穿透、超时/断线/同命令多条 |
+| `lane_core_test` | 18 项全过：1000 任务 2ms、峰值并发 4、异常穿透、超时/断线/同命令多条 |
 | 连发 | **112 张卡 / 225 秒**，已发卡 112、回收 0、超时 0、故障 0 |
 | 稳定性 | 全程 GUI 存活，工作集 54 MB |
 | 资源 | 无显式 `delete`、无手工缓冲、无轮询线程；Qt 控件保留 `new`（由父子树托管） |
