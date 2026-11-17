@@ -2,6 +2,7 @@
 #define LANEWINDOW_H
 
 #include <QByteArray>
+#include <QDateTime>
 #include <QList>
 #include <QTcpSocket>
 #include <QWidget>
@@ -10,39 +11,36 @@
 
 class QLabel;
 class QLineEdit;
-class QProgressBar;
 class QPushButton;
 class QTableWidget;
 class QTextEdit;
 class QTimer;
 class StatusPoller;
 
-// 车道流程状态 (上位机自己的, 和设备状态是两套)
+// 车道流程状态 (上位机自己的)
 enum
 {
     LS_IDLE = 0,        // 无车, 等来车
-    LS_ARRIVED,         // 来车, 已收到车辆信息
-    LS_PREPARING,       // 已下发备卡
+    LS_ARRIVED,         // 来车, 已选好工位
     LS_WRITING,         // 已下发写卡
-    LS_PRESENTING,      // 已下发伸卡
-    LS_WAIT_TAKE,       // 卡槽已伸出, 等司机取卡
-    LS_TAKEN,           // 司机已取卡, 播报中
-    LS_RETRACTING,      // 已下发缩卡
-    LS_WAIT_LEAVE,      // 等车辆驶离 (存在线圈释放)
-    LS_RECOVERING,      // 回收卡片
-    LS_NOCARD,          // 卡箱无卡
+    LS_PRESENTING,      // 已下发送卡
+    LS_WAIT_TAKE,       // 卡已送出, 等司机取
+    LS_TAKEN,           // 司机已取卡
+    LS_WAIT_LEAVE,      // 等车辆驶离
+    LS_RECOVERING,      // 回收
+    LS_NOPOS,           // 没有可用工位
     LS_FAULT            // 故障
 };
 
 // ============================================================================
-//  车道控制主窗口 —— v0 脏代码基线
+//  车道控制主窗口 —— v0 脏代码基线 (A 阶段: 4 工位)
 //
-//  真实车道上, 上位机是**事件驱动**的: 车压地感 -> 备卡 -> 写卡 -> 伸卡
-//  -> 等取卡 -> 缩卡 -> 放行。人只负责处理异常, 不参与日常发卡。
+//  真实车道上, 上位机只做三件事: 选工位 -> 写卡 -> 送卡。
+//  备卡是机器人自己维持的(送完自动补备, 失败切配对工位), 车道不参与。
 //
 //  脏的地方:
 //    * 界面 / 通信 / 协议 / 车道流程 / 流水 全在一个类里
-//    * 流程推进靠 onEvent() 里的 if/else 链 + m_state 数字
+//    * 工位选择、结果分发都是 if/else 链
 //    * 事件到达时不校验"当前状态是否合法"
 //    * 手动按钮直接下发命令, 绕过状态机
 //    * 裸指针、写死超时、只在 Windows 上能跑
@@ -68,6 +66,7 @@ private slots:
     // ---- 定时器 ----
     void onCmdTimeout();
     void onTakeTimeout();
+    void onHeartCheck();
 
     // ---- 手动调试 ----
     void onManualSelftest();
@@ -83,7 +82,7 @@ private slots:
     void onClearFlow();
     void onRecoverFault();
 
-    // ---- 模拟现场 (只对 LaneSim 有效) ----
+    // ---- 模拟现场 ----
     void onSimCarArrive();
     void onSimTakeCard();
     void onSimCarLeave();
@@ -95,19 +94,21 @@ private:
     void updateHead();
     void updateVehiclePanel();
     void updateLaneView();
+    void updatePosTable();
     void appendFlowRow(const VehicleRecord &rec);
 
     // ---- 通信 ----
-    void sendCmd(int cmd, const QByteArray &payload);   // 需要等 EVENT
-    void sendFire(int cmd, const QByteArray &payload);  // 只回 ACK, 不等
+    void sendCmd(int cmd, const QByteArray &payload);
+    void sendFire(int cmd, const QByteArray &payload);
     void sendDebug(int action);
-    void onEvent(int ev, int param);
+    void onResult(int cmd, int rc);
+    void onState(const QByteArray &payload);
+    void onEvent(int ev, int pos);
 
     // ---- 车道流程 ----
-    void startPrepare();
+    int pickPosition();
     void startWrite();
     void startPresent();
-    void startRetract();
     void doRecycle(int reason);
     void finishVehicle(int result, const QString &remark);
     void enterFault(int rc, const QString &what);
@@ -120,9 +121,11 @@ private:
     QTcpSocket *m_sock;
     QTimer *m_cmdTimer;        // 命令超时 8 秒 (脏: 所有命令共用一个)
     QTimer *m_takeTimer;       // 取卡超时 15 秒
+    QTimer *m_heartTimer;      // 心跳检查 5 秒
     StatusPoller *m_poller;
     QByteArray m_buf;
     char *m_txBuf;             // 手工 new 的发送缓冲
+    QDateTime m_lastHeart;
 
     // ---- 界面 ----
     QLineEdit *m_stationEdit;
@@ -133,8 +136,7 @@ private:
     QPushButton *m_discBtn;
 
     QLabel *m_devLbl;
-    QLabel *m_binLbl;
-    QLabel *m_slotLbl;
+    QLabel *m_heartLbl;
     QLabel *m_barrierLbl;
     QLabel *m_alarmLbl;
 
@@ -142,7 +144,10 @@ private:
     QLabel *m_coilB;
     QLabel *m_slotIcon;
     QLabel *m_barrierIcon;
-    QProgressBar *m_binBar;
+    QLabel *m_curPosLbl;
+    QLabel *m_screen;
+
+    QTableWidget *m_posTable;   // 4 工位状态表
 
     QLabel *m_seqLbl;
     QLabel *m_plateLbl;
@@ -150,7 +155,6 @@ private:
     QLabel *m_timeLbl;
     QLabel *m_cardLbl;
     QLabel *m_stateLbl;
-    QLabel *m_screen;
 
     QTableWidget *m_table;
     QTextEdit *m_log;
@@ -172,25 +176,26 @@ private:
     QPushButton *m_bSimLeave;
 
     // ---- 业务 ----
-    VehicleRecord m_cur;       // 当前这辆车
-    QList<VehicleRecord> m_flows;   // 流水 (值拷贝, 脏: 全量重绘)
+    VehicleRecord m_cur;
+    QList<VehicleRecord> m_flows;
     int m_state;
-    int m_seq;                 // 流水号
-    int m_retry;               // 写卡重试次数
-    int m_voiceCount;          // 已播报"请取卡"次数
+    int m_seq;
+    int m_retry;
+    int m_voiceCount;
     bool m_carPresent;
     bool m_barrierUp;
     bool m_recovering;
 
-    int m_devState;
-    int m_binLeft;
-    int m_errCode;
-    int m_slotPos;
+    // ---- 设备侧 ----
+    int m_devState;            // 整体状态 DS_*
+    int m_posState[5];         // 1..4 工位状态 PS_*
+    int m_posBin[5];           // 1..4 卡数
+    QString m_posCard[5];      // 1..4 当前卡号 (B4 上报)
+    int m_curPos;              // 本单车在用哪个工位
+    int m_stretch;             // 伸缩机构
 
-    QString m_vehPlate;        // 最近一次车辆信息帧
+    QString m_vehPlate;
     int m_vehKind;
-    QString m_lastCardNo;      // 最近一次卡号帧
-    QString m_screenText;
 };
 
 #endif // LANEWINDOW_H

@@ -69,50 +69,85 @@ QString rcText(int rc)
 {
     if (rc == RC_OK)
         return QString::fromUtf8("成功");
-    if (rc == RC_BIN_EMPTY)
-        return QString::fromUtf8("卡箱无卡");
+    if (rc == RC_NO_CARD)
+        return QString::fromUtf8("工位无卡");
     if (rc == RC_JAM)
         return QString::fromUtf8("卡片卡滞");
     if (rc == RC_WRITE_FAIL)
         return QString::fromUtf8("写卡失败");
     if (rc == RC_VERIFY_FAIL)
-        return QString::fromUtf8("写后回读校验失败");
+        return QString::fromUtf8("回读校验失败");
     if (rc == RC_TIMEOUT)
         return QString::fromUtf8("设备响应超时");
     if (rc == RC_BAD_STATE)
-        return QString::fromUtf8("设备状态不允许");
+        return QString::fromUtf8("状态不允许");
     if (rc == RC_UNKNOWN_CMD)
         return QString::fromUtf8("不支持的命令");
-    if (rc == RC_TAKE_TIMEOUT)
-        return QString::fromUtf8("超时未取卡");
-    if (rc == RC_ABORT)
-        return QString::fromUtf8("流程中止");
+    if (rc == RC_NO_POS)
+        return QString::fromUtf8("工位号不存在");
+    if (rc == RC_NOT_READY)
+        return QString::fromUtf8("该工位未备卡");
     return QString::fromUtf8("未知结果(%1)").arg(rc);
 }
 
-QString devStateText(int st)
+QString posText(int pos)
 {
-    if (st == DEV_IDLE)
-        return QString::fromUtf8("待机");
-    if (st == DEV_SELFTEST)
-        return QString::fromUtf8("自检中");
-    if (st == DEV_PREPARING)
-        return QString::fromUtf8("备卡中");
-    if (st == DEV_WRITING)
-        return QString::fromUtf8("写卡中");
-    if (st == DEV_PRESENTING)
-        return QString::fromUtf8("伸卡中");
-    if (st == DEV_WAIT_TAKE)
-        return QString::fromUtf8("等待取卡");
-    if (st == DEV_RETRACTING)
-        return QString::fromUtf8("缩卡中");
-    if (st == DEV_RECYCLING)
-        return QString::fromUtf8("回收中");
-    if (st == DEV_NO_CARD)
-        return QString::fromUtf8("卡箱无卡");
-    if (st == DEV_FAULT)
+    if (pos == POS_UP_LEFT)
+        return QString::fromUtf8("上左");
+    if (pos == POS_UP_RIGHT)
+        return QString::fromUtf8("上右");
+    if (pos == POS_DOWN_LEFT)
+        return QString::fromUtf8("下左");
+    if (pos == POS_DOWN_RIGHT)
+        return QString::fromUtf8("下右");
+    return QString::fromUtf8("工位%1").arg(pos);
+}
+
+QString posStateText(int st)
+{
+    if (st == PS_EMPTY)
+        return QString::fromUtf8("空");
+    if (st == PS_READY)
+        return QString::fromUtf8("已备卡");
+    if (st == PS_FAILED)
+        return QString::fromUtf8("备卡失败");
+    if (st == PS_SENT)
+        return QString::fromUtf8("已送卡");
+    if (st == PS_FAULT)
         return QString::fromUtf8("故障");
     return QString::fromUtf8("未知(%1)").arg(st);
+}
+
+QString devSummaryText(int st)
+{
+    if (st == DS_NORMAL)
+        return QString::fromUtf8("正常");
+    if (st == DS_PARTIAL)
+        return QString::fromUtf8("部分工位不可用");
+    if (st == DS_ALLDOWN)
+        return QString::fromUtf8("全部工位不可用");
+    return QString::fromUtf8("未知(%1)").arg(st);
+}
+
+QString eventText(int ev)
+{
+    if (ev == EV_CAR_ARRIVED)
+        return QString::fromUtf8("车辆到达");
+    if (ev == EV_CAR_LEFT)
+        return QString::fromUtf8("车辆驶离");
+    if (ev == EV_CARD_TAKEN)
+        return QString::fromUtf8("司机取卡");
+    if (ev == EV_PREPARE_RECOVER)
+        return QString::fromUtf8("备卡恢复");
+    if (ev == EV_LEFT_NO_CARD)
+        return QString::fromUtf8("未取卡驶离");
+    if (ev == EV_POS_NO_CARD)
+        return QString::fromUtf8("工位无卡");
+    if (ev == EV_POS_LOW)
+        return QString::fromUtf8("余量不足");
+    if (ev == EV_POS_FAULT)
+        return QString::fromUtf8("工位故障");
+    return QString::fromUtf8("事件%1").arg(ev);
 }
 
 QString hostStateText(int st)
@@ -122,24 +157,20 @@ QString hostStateText(int st)
     if (st == 1)
         return QString::fromUtf8("来车");
     if (st == 2)
-        return QString::fromUtf8("备卡中");
-    if (st == 3)
         return QString::fromUtf8("写卡中");
+    if (st == 3)
+        return QString::fromUtf8("送卡中");
     if (st == 4)
-        return QString::fromUtf8("伸卡中");
-    if (st == 5)
         return QString::fromUtf8("等待司机取卡");
-    if (st == 6)
+    if (st == 5)
         return QString::fromUtf8("已取卡");
-    if (st == 7)
-        return QString::fromUtf8("缩卡中");
-    if (st == 8)
+    if (st == 6)
         return QString::fromUtf8("等待车辆驶离");
-    if (st == 9)
+    if (st == 7)
         return QString::fromUtf8("回收卡片");
-    if (st == 10)
-        return QString::fromUtf8("卡箱无卡");
-    if (st == 11)
+    if (st == 8)
+        return QString::fromUtf8("无可用工位");
+    if (st == 9)
         return QString::fromUtf8("故障");
     return QString::fromUtf8("未知(%1)").arg(st);
 }

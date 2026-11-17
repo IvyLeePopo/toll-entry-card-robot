@@ -2,7 +2,6 @@
 #include "logger.h"
 #include "protocol.h"
 
-#include <QApplication>
 #include <QBrush>
 #include <QColor>
 #include <QDateTime>
@@ -10,14 +9,14 @@
 #include <QFont>
 #include <QGridLayout>
 #include <QGroupBox>
-#include <QHBoxLayout>
 #include <QHeaderView>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QProgressBar>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QStringList>
 #include <QTextEdit>
 #include <QThread>
 #include <QTimer>
@@ -41,9 +40,8 @@ static void setLamp(QLabel *l, bool on)
 // ============================================================================
 //  状态轮询线程
 //  脏点:
-//    1. 为了每 2 秒查一次状态专门开一个线程, 一个 QTimer 就够了
+//    1. 设备本来每 20 秒就主动发心跳, 这里又开一个线程每 2 秒查状态
 //    2. volatile bool 当停止标志, 不是同步原语
-//    3. 停线程要等 sleep 醒来
 //   -> W1 用线程池 + std::atomic 换掉
 // ============================================================================
 class StatusPoller : public QThread
@@ -81,6 +79,7 @@ LaneWindow::LaneWindow(QWidget *parent)
     m_cmdTimer->setSingleShot(true);
     m_takeTimer = new QTimer(this);
     m_takeTimer->setSingleShot(true);
+    m_heartTimer = new QTimer(this);
 
     m_txBuf = new char[512];          // 脏点: 手工缓冲, 长度写死
     memset(m_txBuf, 0, 512);
@@ -92,14 +91,18 @@ LaneWindow::LaneWindow(QWidget *parent)
     m_retry = 0;
     m_voiceCount = 0;
     m_carPresent = false;
-
-    m_devState = -1;
-    m_binLeft = -1;
-    m_errCode = -1;
-    m_slotPos = -1;
-    m_vehKind = 0;
     m_barrierUp = false;
     m_recovering = false;
+
+    m_devState = -1;
+    m_curPos = 0;
+    m_stretch = 0;
+    m_vehKind = 0;
+    for (int i = 1; i <= POS_COUNT; ++i)
+    {
+        m_posState[i] = -1;
+        m_posBin[i] = -1;
+    }
 
     buildUi();
 
@@ -111,6 +114,7 @@ LaneWindow::LaneWindow(QWidget *parent)
 
     connect(m_cmdTimer, SIGNAL(timeout()), this, SLOT(onCmdTimeout()));
     connect(m_takeTimer, SIGNAL(timeout()), this, SLOT(onTakeTimeout()));
+    connect(m_heartTimer, SIGNAL(timeout()), this, SLOT(onHeartCheck()));
 
     connect(m_connBtn, SIGNAL(clicked()), this, SLOT(onConnect()));
     connect(m_discBtn, SIGNAL(clicked()), this, SLOT(onDisconnect()));
@@ -133,10 +137,11 @@ LaneWindow::LaneWindow(QWidget *parent)
     connect(m_bSimLeave, SIGNAL(clicked()), this, SLOT(onSimCarLeave()));
 
     m_poller->start();
+    m_heartTimer->start(5000);
 
     showScreen(QString::fromUtf8("欢迎光临"));
     log(QString::fromUtf8("车道控制软件启动. 先启动 LaneSim, 再点[连接]"));
-    log(QString::fromUtf8("提示: 来车要在 LaneSim 控制台里敲 car (或开自动来车)"));
+    log(QString::fromUtf8("提示: 备卡是机器人自己维持的, 车道只管 选工位->写卡->送卡"));
 }
 
 LaneWindow::~LaneWindow()
@@ -166,7 +171,7 @@ void LaneWindow::buildUi()
 
     top->addWidget(new QLabel(QString::fromUtf8("站号:")));
     m_stationEdit = new QLineEdit(QString::fromUtf8("0512"));
-    m_stationEdit->setFixedWidth(60);
+    m_stationEdit->setFixedWidth(55);
     top->addWidget(m_stationEdit);
 
     top->addWidget(new QLabel(QString::fromUtf8("车道:")));
@@ -177,7 +182,7 @@ void LaneWindow::buildUi()
     top->addSpacing(8);
     top->addWidget(new QLabel(QString::fromUtf8("IP:")));
     m_ipEdit = new QLineEdit(QString::fromUtf8("127.0.0.1"));
-    m_ipEdit->setFixedWidth(100);
+    m_ipEdit->setFixedWidth(95);
     top->addWidget(m_ipEdit);
 
     top->addWidget(new QLabel(QString::fromUtf8("端口:")));
@@ -193,8 +198,7 @@ void LaneWindow::buildUi()
 
     top->addSpacing(12);
     m_devLbl = new QLabel(QString::fromUtf8("设备: 未连接"));
-    m_binLbl = new QLabel(QString::fromUtf8("卡箱: -"));
-    m_slotLbl = new QLabel(QString::fromUtf8("卡槽: -"));
+    m_heartLbl = new QLabel(QString::fromUtf8("心跳: -"));
     m_barrierLbl = new QLabel(QString::fromUtf8("栏杆: -"));
 
     QFont bold = m_devLbl->font();
@@ -202,8 +206,7 @@ void LaneWindow::buildUi()
     m_devLbl->setFont(bold);
 
     top->addWidget(m_devLbl);
-    top->addWidget(m_binLbl);
-    top->addWidget(m_slotLbl);
+    top->addWidget(m_heartLbl);
     top->addWidget(m_barrierLbl);
     top->addStretch();
     root->addLayout(top);
@@ -222,20 +225,25 @@ void LaneWindow::buildUi()
     setLamp(m_coilA, false);
     lg->addWidget(m_coilA, 0, 1);
 
-    lg->addWidget(new QLabel(QString::fromUtf8("发卡机卡槽")), 1, 0);
+    lg->addWidget(new QLabel(QString::fromUtf8("当前工位")), 1, 0);
+    m_curPosLbl = new QLabel(QString::fromUtf8("-"));
+    m_curPosLbl->setStyleSheet("font-size:16px; color:#0044aa; font-weight:bold;");
+    lg->addWidget(m_curPosLbl, 1, 1);
+
+    lg->addWidget(new QLabel(QString::fromUtf8("伸缩机构")), 2, 0);
     m_slotIcon = new QLabel(QString::fromUtf8("──  缩回"));
     m_slotIcon->setStyleSheet("font-size:16px; color:#555;");
-    lg->addWidget(m_slotIcon, 1, 1);
+    lg->addWidget(m_slotIcon, 2, 1);
 
-    lg->addWidget(new QLabel(QString::fromUtf8("栏杆")), 2, 0);
+    lg->addWidget(new QLabel(QString::fromUtf8("栏杆")), 3, 0);
     m_barrierIcon = new QLabel(QString::fromUtf8("▬  落杆"));
     m_barrierIcon->setStyleSheet("font-size:16px; color:#555;");
-    lg->addWidget(m_barrierIcon, 2, 1);
+    lg->addWidget(m_barrierIcon, 3, 1);
 
-    lg->addWidget(new QLabel(QString::fromUtf8("存在线圈 B")), 3, 0);
+    lg->addWidget(new QLabel(QString::fromUtf8("存在线圈 B")), 4, 0);
     m_coilB = new QLabel(QString::fromUtf8("●"));
     setLamp(m_coilB, false);
-    lg->addWidget(m_coilB, 3, 1);
+    lg->addWidget(m_coilB, 4, 1);
 
     laneLay->addLayout(lg);
 
@@ -243,19 +251,23 @@ void LaneWindow::buildUi()
     m_screen = new QLabel(QString::fromUtf8("欢迎光临"));
     m_screen->setAlignment(Qt::AlignCenter);
     m_screen->setWordWrap(true);
-    m_screen->setMinimumHeight(80);
+    m_screen->setMinimumHeight(70);
     m_screen->setStyleSheet(
         "background:#101010; color:#33ff66; border:1px solid #333;"
-        "font-family:'Microsoft YaHei'; font-size:20px; font-weight:bold;");
+        "font-family:'Microsoft YaHei'; font-size:18px; font-weight:bold;");
     laneLay->addWidget(m_screen);
 
-    laneLay->addSpacing(6);
-    laneLay->addWidget(new QLabel(QString::fromUtf8("卡箱余量:")));
-    m_binBar = new QProgressBar;
-    m_binBar->setRange(0, 500);
-    m_binBar->setValue(0);
-    m_binBar->setFormat(QString::fromUtf8("%v / 500"));
-    laneLay->addWidget(m_binBar);
+    laneLay->addSpacing(4);
+    QGridLayout *sg = new QGridLayout;
+    m_bSimCar = new QPushButton(QString::fromUtf8("模拟来车"));
+    m_bSimTake = new QPushButton(QString::fromUtf8("模拟取卡"));
+    m_bSimLeave = new QPushButton(QString::fromUtf8("模拟驶离"));
+    m_bSimCar->setStyleSheet("font-weight:bold; color:#0044aa;");
+    m_bSimCar->setMinimumHeight(30);
+    sg->addWidget(m_bSimCar, 0, 0, 1, 2);
+    sg->addWidget(m_bSimTake, 1, 0);
+    sg->addWidget(m_bSimLeave, 1, 1);
+    laneLay->addLayout(sg);
     laneLay->addStretch();
 
     mid->addWidget(laneBox, 3);
@@ -265,7 +277,7 @@ void LaneWindow::buildUi()
     QGridLayout *vg = new QGridLayout(vehBox);
 
     QFont big = font();
-    big.setPointSize(14);
+    big.setPointSize(13);
     big.setBold(true);
 
     vg->addWidget(new QLabel(QString::fromUtf8("流水号:")), 0, 0);
@@ -307,14 +319,43 @@ void LaneWindow::buildUi()
 
     mid->addWidget(vehBox, 3);
 
-    // ---- 手动控制 ----
+    // ---- 4 工位 ----
+    QGroupBox *posBox = new QGroupBox(QString::fromUtf8("发卡工位 (4 工位)"));
+    QVBoxLayout *pv = new QVBoxLayout(posBox);
+
+    m_posTable = new QTableWidget(POS_COUNT, 4);
+    QStringList ph;
+    ph << QString::fromUtf8("工位")
+       << QString::fromUtf8("状态")
+       << QString::fromUtf8("卡数")
+       << QString::fromUtf8("卡号");
+    m_posTable->setHorizontalHeaderLabels(ph);
+    m_posTable->horizontalHeader()->setStretchLastSection(true);
+    m_posTable->setColumnWidth(0, 60);
+    m_posTable->setColumnWidth(1, 80);
+    m_posTable->setColumnWidth(2, 50);
+    m_posTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_posTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_posTable->verticalHeader()->setVisible(false);
+    for (int i = 0; i < POS_COUNT; ++i)
+    {
+        m_posTable->setRowHeight(i, 26);
+        for (int c = 0; c < 4; ++c)
+            m_posTable->setItem(i, c, new QTableWidgetItem(QString("-")));
+    }
+    pv->addWidget(m_posTable);
+    mid->addWidget(posBox, 3);
+
+    root->addLayout(mid, 3);
+
+    // ---------------- 第三行: 手动控制 ----------------
     QGroupBox *manBox = new QGroupBox(QString::fromUtf8("手动控制 (单步 / 排障)"));
     QGridLayout *mg = new QGridLayout(manBox);
 
     m_bSelfTest = new QPushButton(QString::fromUtf8("自检"));
-    m_bPrepare = new QPushButton(QString::fromUtf8("备卡"));
+    m_bPrepare = new QPushButton(QString::fromUtf8("全部备卡"));
     m_bWrite = new QPushButton(QString::fromUtf8("写卡"));
-    m_bPresent = new QPushButton(QString::fromUtf8("伸卡"));
+    m_bPresent = new QPushButton(QString::fromUtf8("送卡"));
     m_bRetract = new QPushButton(QString::fromUtf8("缩卡"));
     m_bRecycle = new QPushButton(QString::fromUtf8("回收"));
     m_bVoice = new QPushButton(QString::fromUtf8("播报"));
@@ -322,52 +363,27 @@ void LaneWindow::buildUi()
     m_bDown = new QPushButton(QString::fromUtf8("落杆"));
     m_bReset = new QPushButton(QString::fromUtf8("复位"));
     m_bClear = new QPushButton(QString::fromUtf8("清流水"));
+    m_bRecover = new QPushButton(QString::fromUtf8("故障恢复 / 跳过本车"));
+    m_bRecover->setStyleSheet("font-weight:bold; color:#c00;");
 
     mg->addWidget(m_bSelfTest, 0, 0);
     mg->addWidget(m_bPrepare, 0, 1);
-    mg->addWidget(m_bWrite, 1, 0);
-    mg->addWidget(m_bPresent, 1, 1);
-    mg->addWidget(m_bRetract, 2, 0);
-    mg->addWidget(m_bRecycle, 2, 1);
-    mg->addWidget(m_bVoice, 3, 0);
-    mg->addWidget(m_bUp, 3, 1);
-    mg->addWidget(m_bDown, 4, 0);
-    mg->addWidget(m_bReset, 4, 1);
-    mg->addWidget(m_bClear, 5, 0, 1, 2);
+    mg->addWidget(m_bWrite, 0, 2);
+    mg->addWidget(m_bPresent, 0, 3);
+    mg->addWidget(m_bRetract, 0, 4);
+    mg->addWidget(m_bRecycle, 0, 5);
+    mg->addWidget(m_bVoice, 1, 0);
+    mg->addWidget(m_bUp, 1, 1);
+    mg->addWidget(m_bDown, 1, 2);
+    mg->addWidget(m_bReset, 1, 3);
+    mg->addWidget(m_bClear, 1, 4);
+    mg->addWidget(m_bRecover, 1, 5);
 
-    m_bRecover = new QPushButton(QString::fromUtf8("故障恢复 / 跳过本车"));
-    m_bRecover->setStyleSheet("font-weight:bold; color:#c00;");
-    m_bRecover->setMinimumHeight(32);
-    mg->addWidget(m_bRecover, 6, 0, 1, 2);
+    root->addWidget(manBox);
 
-    mg->setRowStretch(7, 1);
+    // ---------------- 第四行: 流水 + 日志 ----------------
+    QHBoxLayout *bottom = new QHBoxLayout;
 
-    // ---- 模拟现场 (录 demo / 单机联调用) ----
-    QGroupBox *simBox = new QGroupBox(QString::fromUtf8("模拟现场 (只对 LaneSim 有效)"));
-    QGridLayout *sg = new QGridLayout(simBox);
-
-    m_bSimCar = new QPushButton(QString::fromUtf8("模拟来车"));
-    m_bSimTake = new QPushButton(QString::fromUtf8("模拟取卡"));
-    m_bSimLeave = new QPushButton(QString::fromUtf8("模拟驶离"));
-
-    m_bSimCar->setStyleSheet("font-weight:bold; color:#0044aa;");
-    m_bSimCar->setMinimumHeight(34);
-
-    sg->addWidget(m_bSimCar, 0, 0, 1, 2);
-    sg->addWidget(m_bSimTake, 1, 0);
-    sg->addWidget(m_bSimLeave, 1, 1);
-
-    QWidget *rightCol = new QWidget;
-    QVBoxLayout *rightLay = new QVBoxLayout(rightCol);
-    rightLay->setContentsMargins(0, 0, 0, 0);
-    rightLay->addWidget(manBox, 3);
-    rightLay->addWidget(simBox, 1);
-
-    mid->addWidget(rightCol, 2);
-
-    root->addLayout(mid, 3);
-
-    // ---------------- 流水表 ----------------
     QGroupBox *flowBox = new QGroupBox(QString::fromUtf8("通行流水"));
     QVBoxLayout *fl = new QVBoxLayout(flowBox);
 
@@ -382,23 +398,26 @@ void LaneWindow::buildUi()
         << QString::fromUtf8("结果");
     m_table->setHorizontalHeaderLabels(hdr);
     m_table->horizontalHeader()->setStretchLastSection(true);
-    m_table->setColumnWidth(0, 70);
-    m_table->setColumnWidth(1, 90);
-    m_table->setColumnWidth(2, 100);
-    m_table->setColumnWidth(3, 90);
-    m_table->setColumnWidth(4, 100);
-    m_table->setColumnWidth(5, 90);
+    m_table->setColumnWidth(0, 60);
+    m_table->setColumnWidth(1, 80);
+    m_table->setColumnWidth(2, 90);
+    m_table->setColumnWidth(3, 85);
+    m_table->setColumnWidth(4, 90);
+    m_table->setColumnWidth(5, 80);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     fl->addWidget(m_table);
+    bottom->addWidget(flowBox, 3);
 
-    root->addWidget(flowBox, 2);
-
-    // ---------------- 日志 ----------------
+    QGroupBox *logBox = new QGroupBox(QString::fromUtf8("运行日志"));
+    QVBoxLayout *lb = new QVBoxLayout(logBox);
     m_log = new QTextEdit;
     m_log->setReadOnly(true);
     m_log->setStyleSheet("font-family:Consolas,'Courier New'; font-size:12px;");
-    root->addWidget(m_log, 2);
+    lb->addWidget(m_log);
+    bottom->addWidget(logBox, 2);
+
+    root->addLayout(bottom, 2);
 }
 
 // ============================================================================
@@ -414,29 +433,38 @@ void LaneWindow::log(const QString &s)
 
 void LaneWindow::updateHead()
 {
-    QString dev = QString::fromUtf8("设备: ") + devStateText(m_devState);
+    QString dev = QString::fromUtf8("设备: ") + devSummaryText(m_devState);
     if (m_sock->state() != QAbstractSocket::ConnectedState)
         dev = QString::fromUtf8("设备: 未连接");
     m_devLbl->setText(dev);
 
-    m_binLbl->setText(QString::fromUtf8("卡箱: %1")
-                      .arg(m_binLeft < 0 ? QString("-") : QString::number(m_binLeft)));
-    m_slotLbl->setText(QString::fromUtf8("卡槽: %1")
-                       .arg(m_slotPos == SLOT_OUT ? QString::fromUtf8("伸出")
-                            : m_slotPos == SLOT_IN ? QString::fromUtf8("缩回") : QString("-")));
+    if (m_lastHeart.isValid() && m_sock->state() == QAbstractSocket::ConnectedState)
+    {
+        qint64 sec = m_lastHeart.secsTo(QDateTime::currentDateTime());
+        m_heartLbl->setText(QString::fromUtf8("心跳: %1 秒前").arg(sec));
+        if (sec > 45)
+            m_heartLbl->setStyleSheet("color:#c00; font-weight:bold;");
+        else
+            m_heartLbl->setStyleSheet("color:#0a0;");
+    }
+    else
+    {
+        m_heartLbl->setText(QString::fromUtf8("心跳: -"));
+        m_heartLbl->setStyleSheet("color:#888;");
+    }
+
     m_barrierLbl->setText(QString::fromUtf8("栏杆: %1")
                           .arg(m_barrierUp ? QString::fromUtf8("抬起") : QString::fromUtf8("落下")));
 
     // 脏点: 状态灯颜色靠重新 setStyleSheet, 每次刷新都触发一次样式重算
-    if (m_devState == DEV_FAULT || m_devState == DEV_NO_CARD)
+    if (m_devState == DS_ALLDOWN)
         m_devLbl->setStyleSheet("color:#c00; font-weight:bold;");
+    else if (m_devState == DS_PARTIAL)
+        m_devLbl->setStyleSheet("color:#e08000; font-weight:bold;");
     else if (m_sock->state() != QAbstractSocket::ConnectedState)
         m_devLbl->setStyleSheet("color:#888; font-weight:bold;");
     else
         m_devLbl->setStyleSheet("color:#0a0; font-weight:bold;");
-
-    if (m_binLeft >= 0)
-        m_binBar->setValue(m_binLeft);
 }
 
 void LaneWindow::updateLaneView()
@@ -444,9 +472,11 @@ void LaneWindow::updateLaneView()
     setLamp(m_coilA, m_carPresent);
     setLamp(m_coilB, m_carPresent);
 
-    if (m_slotPos == SLOT_OUT)
+    m_curPosLbl->setText(m_curPos > 0 ? posText(m_curPos) : QString("-"));
+
+    if (m_stretch == STRETCH_OUT)
     {
-        m_slotIcon->setText(QString::fromUtf8("═══> 伸出"));
+        m_slotIcon->setText(QString::fromUtf8("═══> 伸出20cm"));
         m_slotIcon->setStyleSheet("font-size:16px; color:#c07000; font-weight:bold;");
     }
     else
@@ -464,6 +494,35 @@ void LaneWindow::updateLaneView()
     {
         m_barrierIcon->setText(QString::fromUtf8("▬  落杆"));
         m_barrierIcon->setStyleSheet("font-size:16px; color:#555;");
+    }
+}
+
+void LaneWindow::updatePosTable()
+{
+    // 脏点: 每来一帧状态就把整张表刷一遍
+    for (int i = 1; i <= POS_COUNT; ++i)
+    {
+        int r = i - 1;
+
+        m_posTable->item(r, 0)->setText(posText(i));
+        m_posTable->item(r, 1)->setText(m_posState[i] < 0 ? QString("-") : posStateText(m_posState[i]));
+        m_posTable->item(r, 2)->setText(m_posBin[i] < 0 ? QString("-") : QString::number(m_posBin[i]));
+        m_posTable->item(r, 3)->setText(m_posCard[i].isEmpty() ? QString("-") : m_posCard[i]);
+
+        QColor c(80, 80, 80);
+        if (m_posState[i] == PS_READY)
+            c = QColor(0, 130, 0);
+        else if (m_posState[i] == PS_SENT)
+            c = QColor(200, 120, 0);
+        else if (m_posState[i] == PS_FAILED || m_posState[i] == PS_FAULT)
+            c = QColor(190, 0, 0);
+
+        m_posTable->item(r, 1)->setForeground(QBrush(c));
+
+        // 当前工位高亮
+        QColor bg = (i == m_curPos) ? QColor(255, 250, 205) : QColor(255, 255, 255);
+        for (int col = 0; col < 4; ++col)
+            m_posTable->item(r, col)->setBackground(QBrush(bg));
     }
 }
 
@@ -545,17 +604,21 @@ void LaneWindow::onConnect()
         return;
     }
 
-    // 真实车道: 连上先自检
-    sendCmd(CMD_SELFTEST, QByteArray());
+    // 真实车道: 连上先对时, 再自检 (现场 C1 时间同步)
+    sendCmd(CMD_TIME_SYNC,
+            QDateTime::currentDateTime().toString("yyyyMMddhhmmss").toLocal8Bit());
 }
 
 void LaneWindow::onConnected()
 {
     m_connBtn->setEnabled(false);
     m_discBtn->setEnabled(true);
+    m_lastHeart = QDateTime::currentDateTime();
     log(QString::fromUtf8("已连接车道设备"));
+
     sendFire(CMD_GET_STATUS, QByteArray());
     updateHead();
+    updatePosTable();
 }
 
 void LaneWindow::onDisconnect()
@@ -571,9 +634,13 @@ void LaneWindow::onDisconnected()
     m_connBtn->setEnabled(true);
     m_discBtn->setEnabled(false);
     m_devState = -1;
-    m_binLeft = -1;
-    m_slotPos = -1;
-    m_errCode = -1;
+    m_curPos = 0;
+    m_stretch = STRETCH_IN;
+    for (int i = 1; i <= POS_COUNT; ++i)
+    {
+        m_posState[i] = -1;
+        m_posBin[i] = -1;
+    }
     m_buf.clear();
     m_cmdTimer->stop();
     m_takeTimer->stop();
@@ -583,6 +650,7 @@ void LaneWindow::onDisconnected()
         log(QString::fromUtf8("注意: 断开时车道还在 [%1], 卡可能留在机器里")
             .arg(hostStateText(m_state)));
     updateHead();
+    updatePosTable();
 }
 
 void LaneWindow::onSockError(QAbstractSocket::SocketError e)
@@ -597,6 +665,27 @@ void LaneWindow::onPollTick()
         return;
     // 脏点: 绕过 sendCmd 直接写, 免得打乱流程超时定时器; 同一动作两套发送路径
     m_sock->write(buildFrame(CMD_GET_STATUS, QByteArray()));
+}
+
+void LaneWindow::onHeartCheck()
+{
+    if (m_sock->state() != QAbstractSocket::ConnectedState)
+        return;
+    if (!m_lastHeart.isValid())
+        return;
+
+    // 脏点: 心跳超时只报警, 不重连, 不落地当前流程
+    qint64 sec = m_lastHeart.secsTo(QDateTime::currentDateTime());
+    if (sec > 45)
+    {
+        if (m_alarmLbl->text().indexOf(QString::fromUtf8("心跳")) < 0)
+        {
+            m_alarmLbl->setText(QString::fromUtf8("报警: 设备心跳超时 %1 秒").arg(sec));
+            m_alarmLbl->setStyleSheet("color:#c00; font-weight:bold;");
+            log(QString::fromUtf8("!! 设备心跳超时"));
+        }
+    }
+    updateHead();
 }
 
 // ============================================================================
@@ -626,30 +715,40 @@ void LaneWindow::onReadyRead()
 
         m_buf = m_buf.mid(used);
 
-        if (cmd == CMD_ACK)
+        if (cmd == CMD_RESULT)
         {
-            // 脏点: ACK 只打日志, 不参与流程; "到底该不该等 ACK" 没人写得出来
-            int rc = payload.size() > 0 ? (unsigned char)payload.at(0) : -1;
-            if (rc != RC_OK)
-                log(QString::fromUtf8("设备拒收命令: ") + rcText(rc));
-        }
-        else if (cmd == CMD_STATUS)
-        {
-            if (payload.size() >= 3)
+            if (payload.size() < 2)
             {
-                m_devState = (unsigned char)payload.at(0);
-                m_binLeft = (unsigned char)payload.at(1);
-                m_errCode = (unsigned char)payload.at(2);
-                if (payload.size() >= 4)
-                    m_slotPos = (unsigned char)payload.at(3);   // 脏: 第 4 字节文档里没有
+                log(QString::fromUtf8("结果帧长度不够, 丢弃"));
+                continue;
             }
-            updateHead();
-            updateLaneView();
+            onResult((unsigned char)payload.at(0), (unsigned char)payload.at(1));
+        }
+        else if (cmd == CMD_STATE)
+        {
+            onState(payload);
+        }
+        else if (cmd == CMD_EVENT)
+        {
+            if (payload.size() < 2)
+            {
+                log(QString::fromUtf8("事件帧长度不够, 丢弃"));
+                continue;
+            }
+            onEvent((unsigned char)payload.at(0), (unsigned char)payload.at(1));
         }
         else if (cmd == CMD_CARD_DATA)
         {
-            m_lastCardNo = QString::fromLocal8Bit(payload).trimmed();
-            log(QString::fromUtf8("备卡成功, 卡号 ") + m_lastCardNo);
+            if (payload.size() < 2)
+                continue;
+            int pos = (unsigned char)payload.at(0);
+            QString no = QString::fromLocal8Bit(payload.mid(1)).trimmed();
+            if (pos >= 1 && pos <= POS_COUNT)
+            {
+                m_posCard[pos] = no;
+                log(QString::fromUtf8("%1 工位备卡完成, 卡号 %2").arg(posText(pos)).arg(no));
+                updatePosTable();
+            }
         }
         else if (cmd == CMD_VEHICLE_DATA)
         {
@@ -660,16 +759,10 @@ void LaneWindow::onReadyRead()
             }
             log(QString::fromUtf8("车辆信息: %1 %2").arg(m_vehPlate).arg(kindText(m_vehKind)));
         }
-        else if (cmd == CMD_EVENT)
+        else if (cmd == CMD_HEARTBEAT)
         {
-            if (payload.size() < 2)
-            {
-                log(QString::fromUtf8("EVENT 长度不够, 丢弃"));
-                continue;
-            }
-            int ev = (unsigned char)payload.at(0);
-            int param = (unsigned char)payload.at(1);
-            onEvent(ev, param);
+            m_lastHeart = QDateTime::currentDateTime();
+            updateHead();
         }
         else
         {
@@ -699,7 +792,7 @@ void LaneWindow::sendCmd(int cmd, const QByteArray &payload)
     m_sock->write(m_txBuf, f.size());
     m_sock->flush();
 
-    // 脏点: 备卡 0.9 秒、写卡 0.7 秒, 全用 8 秒超时, 没有按命令区分
+    // 脏点: 备卡 0.9 秒、写卡 0.7 秒、送卡 0.8 秒, 全用 8 秒超时
     m_cmdTimer->start(8000);
 
     log(QString::fromUtf8(">> CMD=0x%1 len=%2").arg(cmd, 2, 16, QChar('0')).arg(f.size()));
@@ -730,33 +823,151 @@ void LaneWindow::sendDebug(int action)
 }
 
 // ============================================================================
-//  车道流程 —— 全项目最脏的地方
+//  上行分发
 // ============================================================================
 
-void LaneWindow::onEvent(int ev, int param)
+void LaneWindow::onResult(int cmd, int rc)
 {
-    // 脏点:
-    //   1. 整个车道流程是一条 if/else 链, 加一个"打印通行券"就要插到中间
-    //   2. 事件到达时从不校验"当前状态能不能接受这个事件",
-    //      所以车还没走下一辆就压线圈时, 上一个流程会被静默覆盖
-    //   3. 事件码用宏, 没有强类型, 传错一个数字编译期毫无提示
-    log(QString::fromUtf8("[事件] %1(%2) 参数=%3")
-        .arg(ev == EV_CARD_READY ? QString::fromUtf8("备卡到位")
-             : ev == EV_WRITE_DONE ? QString::fromUtf8("写卡完成")
-             : ev == EV_SLOT_OUT ? QString::fromUtf8("卡槽伸出")
-             : ev == EV_CARD_TAKEN ? QString::fromUtf8("已取卡")
-             : ev == EV_SLOT_IN ? QString::fromUtf8("卡槽缩回")
-             : ev == EV_RECYCLED ? QString::fromUtf8("回收完成")
-             : ev == EV_CAR_ARRIVED ? QString::fromUtf8("车辆到达")
-             : ev == EV_CAR_LEFT ? QString::fromUtf8("车辆驶离")
-             : ev == EV_LEFT_NO_CARD ? QString::fromUtf8("未取卡驶离")
-             : ev == EV_BIN_EMPTY ? QString::fromUtf8("卡箱无卡")
-             : ev == EV_BIN_LOW ? QString::fromUtf8("卡箱余量低")
-             : ev == EV_FAULT ? QString::fromUtf8("设备故障")
-             : ev == EV_SELFTEST_DONE ? QString::fromUtf8("自检完成")
-             : ev == EV_RESET_DONE ? QString::fromUtf8("复位完成")
-             : QString::fromUtf8("未知"))
-        .arg(ev).arg(param));
+    m_cmdTimer->stop();
+
+    if (rc != RC_OK)
+    {
+        log(QString::fromUtf8("命令 0x%1 失败: %2").arg(cmd, 2, 16, QChar('0')).arg(rcText(rc)));
+
+        if (cmd == CMD_RECYCLE_CARD)
+        {
+            if (m_recovering)
+            {
+                log(QString::fromUtf8("机构里没有残留卡, 跳过回收"));
+                return;                 // 由恢复流程的兜底定时器收尾
+            }
+            log(QString::fromUtf8("回收失败, 卡片可能还在机构里"));
+            setState(LS_FAULT);
+            return;
+        }
+
+        if (cmd == CMD_WRITE_CARD || cmd == CMD_PRESENT_CARD)
+        {
+            // 脏点: 工位不可用时换一个工位重试, 但没区分"该工位坏了"和"整机忙"
+            if (m_retry < 1 && m_carPresent)
+            {
+                m_retry++;
+                log(QString::fromUtf8("换个工位重试 (第 %1 次)").arg(m_retry));
+                int p = pickPosition();
+                if (p > 0)
+                {
+                    m_curPos = p;
+                    updateLaneView();
+                    startWrite();
+                    return;
+                }
+            }
+            enterFault(rc, QString::fromUtf8("写卡/送卡失败"));
+            return;
+        }
+
+        enterFault(rc, QString::fromUtf8("命令执行失败"));
+        return;
+    }
+
+    // ---- 成功 ----
+    if (cmd == CMD_WRITE_CARD)
+    {
+        startPresent();
+    }
+    else if (cmd == CMD_PRESENT_CARD)
+    {
+        if (m_curPos >= POS_DOWN_LEFT)
+        {
+            m_stretch = STRETCH_OUT;
+            updateLaneView();
+        }
+        setState(LS_WAIT_TAKE);
+        showScreen(QString::fromUtf8("请取卡"));
+        playVoice(VOICE_PLEASE_TAKE);
+        m_voiceCount = 1;
+        m_takeTimer->start(15000);      // 现场一般 30s, 演示用 15s
+    }
+    else if (cmd == CMD_RECYCLE_CARD)
+    {
+        log(QString::fromUtf8("卡片已回收"));
+        if (m_recovering)
+            finishRecover();
+        else
+            setState(LS_WAIT_LEAVE);
+    }
+    else if (cmd == CMD_SELFTEST)
+    {
+        log(QString::fromUtf8("自检完成, 设备就绪"));
+    }
+    else if (cmd == CMD_TIME_SYNC)
+    {
+        log(QString::fromUtf8("对时完成"));
+        sendCmd(CMD_SELFTEST, QByteArray());
+    }
+    else if (cmd == CMD_RESET)
+    {
+        log(QString::fromUtf8("设备复位完成"));
+        if (m_recovering)
+        {
+            if (m_curPos > 0)
+            {
+                doRecycle(RECYCLE_MANUAL);
+                QTimer::singleShot(1200, this, [this]() { finishRecover(); });
+            }
+            else
+            {
+                finishRecover();
+            }
+        }
+        else
+        {
+            setState(LS_IDLE);
+        }
+    }
+}
+
+void LaneWindow::onState(const QByteArray &payload)
+{
+    // 脏点: 9 这个长度是数出来的, 协议文档里只有一句"4 个工位"
+    if (payload.size() < 9)
+    {
+        log(QString::fromUtf8("状态帧长度不对: %1").arg(payload.size()));
+        return;
+    }
+
+    m_devState = (unsigned char)payload.at(0);
+    for (int i = 1; i <= POS_COUNT; ++i)
+    {
+        m_posState[i] = (unsigned char)payload.at(1 + (i - 1) * 2);
+        m_posBin[i] = (unsigned char)payload.at(2 + (i - 1) * 2);
+    }
+
+    updateHead();
+    updatePosTable();
+
+    // 脏点: "没工位可用"之后的恢复, 是偷偷在这里补的:
+    //       只要设备状态帧显示有工位备好了, 就直接接着写卡
+    if (m_state == LS_NOPOS && m_carPresent)
+    {
+        int p = pickPosition();
+        if (p > 0)
+        {
+            log(QString::fromUtf8("工位恢复了, 继续发卡"));
+            m_curPos = p;
+            m_alarmLbl->setText(QString::fromUtf8("无"));
+            m_alarmLbl->setStyleSheet("color:#0a0;");
+            startWrite();
+        }
+    }
+}
+
+void LaneWindow::onEvent(int ev, int pos)
+{
+    // 脏点: 整个车道流程是一条 if/else 链, 事件到达时从不校验当前状态
+    log(QString::fromUtf8("[事件] %1 %2")
+        .arg(eventText(ev))
+        .arg(pos > 0 ? posText(pos) : QString()));
 
     if (ev == EV_CAR_ARRIVED)
     {
@@ -780,53 +991,28 @@ void LaneWindow::onEvent(int ev, int param)
         updateVehiclePanel();
         updateLaneView();
 
-        // 真实车道: 压地感就直接备卡, 不等人工按任何按钮
-        startPrepare();
-    }
-    else if (ev == EV_CARD_READY)
-    {
-        m_cur.cardNo = m_lastCardNo;
-        updateVehiclePanel();
-        startWrite();
-    }
-    else if (ev == EV_WRITE_DONE)
-    {
-        m_cmdTimer->stop();
-        if (param == RC_OK)
+        // 真实车道: 来车直接选一个已经备好卡的工位
+        int p = pickPosition();
+        if (p == 0)
         {
-            startPresent();
+            setState(LS_NOPOS);
+            showScreen(QString::fromUtf8("请稍候"));
+            playVoice(VOICE_WAIT);
+            log(QString::fromUtf8("没有已备卡的工位, 等设备补备"));
+            m_alarmLbl->setText(QString::fromUtf8("报警: 无可用工位"));
+            m_alarmLbl->setStyleSheet("color:#e08000; font-weight:bold;");
+            return;
         }
-        else
-        {
-            log(QString::fromUtf8("写卡失败: ") + rcText(param));
-            if (m_retry < 2)
-            {
-                m_retry++;
-                log(QString::fromUtf8("第 %1 次重试: 先回收废卡").arg(m_retry));
-                doRecycle(RECYCLE_WRITE_FAIL);
-            }
-            else
-            {
-                enterFault(param, QString::fromUtf8("写卡连续失败"));
-            }
-        }
-    }
-    else if (ev == EV_SLOT_OUT)
-    {
-        m_cmdTimer->stop();
-        m_slotPos = SLOT_OUT;
-        setState(LS_WAIT_TAKE);
-        showScreen(QString::fromUtf8("请取卡"));
-        playVoice(VOICE_PLEASE_TAKE);
-        m_voiceCount = 1;
-        // 真实车道一般 30 秒, 演示用 15 秒
-        m_takeTimer->start(15000);
+
+        m_curPos = p;
         updateLaneView();
-        updateHead();
+        updatePosTable();
+        startWrite();
     }
     else if (ev == EV_CARD_TAKEN)
     {
         m_takeTimer->stop();
+        m_stretch = STRETCH_IN;
         m_cur.takeTime = QDateTime::currentDateTime();
         finishVehicle(RES_ISSUED, QString::fromUtf8("正常发卡"));
         setState(LS_TAKEN);
@@ -837,65 +1023,46 @@ void LaneWindow::onEvent(int ev, int param)
         // 取卡后放行
         sendFire(CMD_BARRIER, QByteArray(1, (char)1));
         m_barrierUp = true;
-
-        startRetract();
-    }
-    else if (ev == EV_SLOT_IN)
-    {
-        m_cmdTimer->stop();
-        m_slotPos = SLOT_IN;
         updateLaneView();
         updateHead();
-        if (m_state == LS_RETRACTING)
-            setState(LS_WAIT_LEAVE);
     }
-    else if (ev == EV_RECYCLED)
+    else if (ev == EV_PREPARE_RECOVER)
     {
-        m_cmdTimer->stop();
-
-        if (m_recovering)
+        log(QString::fromUtf8("%1 工位备卡恢复").arg(posText(pos)));
+        if (m_state == LS_NOPOS && m_carPresent)
         {
-            finishRecover();
-            return;
-        }
-
-        if (m_retry > 0 && m_cur.result == RES_RUNNING)
-        {
-            log(QString::fromUtf8("废卡已回收, 重新备卡"));
-            startPrepare();
-        }
-        else
-        {
-            log(QString::fromUtf8("卡片已回收到废卡箱"));
-            setState(LS_WAIT_LEAVE);
+            int p = pickPosition();
+            if (p > 0)
+            {
+                m_curPos = p;
+                m_alarmLbl->setText(QString::fromUtf8("无"));
+                m_alarmLbl->setStyleSheet("color:#0a0;");
+                startWrite();
+            }
         }
     }
-    else if (ev == EV_BIN_EMPTY)
+    else if (ev == EV_POS_NO_CARD)
     {
-        setState(LS_NOCARD);
-        showScreen(QString::fromUtf8("卡箱无卡，请走人工车道"));
-        playVoice(VOICE_NO_CARD);
-        m_alarmLbl->setText(QString::fromUtf8("报警: 卡箱无卡, 需更换卡箱"));
-        m_alarmLbl->setStyleSheet("color:#c00; font-weight:bold;");
-        finishVehicle(RES_NO_CARD, QString::fromUtf8("卡箱无卡"));
-    }
-    else if (ev == EV_BIN_LOW)
-    {
-        m_alarmLbl->setText(QString::fromUtf8("预警: 卡箱仅剩 %1 张, 请补卡").arg(param));
+        log(QString::fromUtf8("%1 工位卡箱无卡, 需要补卡").arg(posText(pos)));
+        m_alarmLbl->setText(QString::fromUtf8("预警: %1 工位卡箱无卡").arg(posText(pos)));
         m_alarmLbl->setStyleSheet("color:#e08000; font-weight:bold;");
-        log(QString::fromUtf8("卡箱余量不足: %1").arg(param));
     }
-    else if (ev == EV_FAULT)
+    else if (ev == EV_POS_LOW)
     {
-        enterFault(param, QString::fromUtf8("设备上报故障"));
+        log(QString::fromUtf8("%1 工位余量不足, 请补卡").arg(posText(pos)));
+    }
+    else if (ev == EV_POS_FAULT)
+    {
+        log(QString::fromUtf8("%1 工位机构故障").arg(posText(pos)));
     }
     else if (ev == EV_LEFT_NO_CARD)
     {
-        // 车没取卡就压过存在线圈走了, 卡还在卡槽里 -> 必须回收, 否则下一辆车就发错了
-        log(QString::fromUtf8("!! 车辆未取卡驶离"));
+        // 车没取卡就走, 卡还挂在工位上 -> 必须回收, 否则下一辆会拿错卡
+        log(QString::fromUtf8("!! 车辆未取卡驶离, 工位 %1").arg(posText(pos)));
         m_alarmLbl->setText(QString::fromUtf8("报警: 车辆未取卡驶离, 卡片已回收"));
         m_alarmLbl->setStyleSheet("color:#c00; font-weight:bold;");
         m_takeTimer->stop();
+        m_curPos = pos;
         finishVehicle(RES_RECYCLED, QString::fromUtf8("未取卡驶离"));
         doRecycle(RECYCLE_MANUAL);
     }
@@ -907,36 +1074,14 @@ void LaneWindow::onEvent(int ev, int param)
             sendFire(CMD_BARRIER, QByteArray(1, (char)0));
             m_barrierUp = false;
         }
-        if (m_state == LS_WAIT_LEAVE || m_state == LS_IDLE)
+        if (m_state == LS_WAIT_LEAVE || m_state == LS_IDLE || m_state == LS_TAKEN)
         {
             setState(LS_IDLE);
+            m_curPos = 0;
             showScreen(QString::fromUtf8("欢迎光临"));
         }
         updateLaneView();
-        updateHead();
-    }
-    else if (ev == EV_SELFTEST_DONE)
-    {
-        m_cmdTimer->stop();
-        log(QString::fromUtf8("自检完成, 设备就绪"));
-        updateHead();
-    }
-    else if (ev == EV_RESET_DONE)
-    {
-        m_cmdTimer->stop();
-        log(QString::fromUtf8("设备复位完成"));
-
-        if (m_recovering)
-        {
-            // 第二步: 把可能夹在机构里的卡回收掉 (没卡时设备会拒收, 属正常)
-            log(QString::fromUtf8("回收残留卡片..."));
-            sendCmd(CMD_RECYCLE_CARD, QByteArray(1, (char)RECYCLE_MANUAL));
-            // 脏点: 没有卡就没有 EV_RECYCLED, 只能靠固定延时兜底
-            QTimer::singleShot(1500, this, [this]() { finishRecover(); });
-            return;
-        }
-
-        setState(LS_IDLE);
+        updatePosTable();
         updateHead();
     }
     else
@@ -945,47 +1090,62 @@ void LaneWindow::onEvent(int ev, int param)
     }
 }
 
-void LaneWindow::startPrepare()
+// ============================================================================
+//  车道流程
+// ============================================================================
+
+int LaneWindow::pickPosition()
 {
-    // 脏点: 卡箱号写死 1; 双卡箱机型直接不能用
-    setState(LS_PREPARING);
-    sendCmd(CMD_PREPARE_CARD, QByteArray(1, (char)1));
+    // 脏点: 工位优先级写死成 1->2->3->4, 不考虑上下组负载均衡,
+    //       也不看该工位卡箱还剩多少
+    for (int i = 1; i <= POS_COUNT; ++i)
+    {
+        if (m_posState[i] == PS_READY)
+            return i;
+    }
+    return 0;
 }
 
 void LaneWindow::startWrite()
 {
+    if (m_curPos < 1 || m_curPos > POS_COUNT)
+    {
+        enterFault(RC_NO_POS, QString::fromUtf8("没有选定工位"));
+        return;
+    }
+
     QString t = QDateTime::currentDateTime().toString("yyyyMMddhhmmss");
-    QByteArray data = packEntryData(m_stationEdit->text(), m_laneEdit->text(),
-                                    m_cur.kind, m_cur.plate, t, m_cur.cardNo);
+    QByteArray data;
+    data.append((char)m_curPos);
+    data.append(packEntryData(m_stationEdit->text(), m_laneEdit->text(),
+                              m_cur.kind, m_cur.plate, t, m_posCard[m_curPos]));
 
     setState(LS_WRITING);
     sendCmd(CMD_WRITE_CARD, data);
 
-    log(QString::fromUtf8("写卡: 入口 %1 站 %2 车道 / 车型 %3 / 车牌 %4 / 卡号 %5")
+    log(QString::fromUtf8("写卡: %1 工位 / 入口 %2 站 %3 车道 / %4 / 车牌 %5")
+        .arg(posText(m_curPos))
         .arg(m_stationEdit->text())
         .arg(m_laneEdit->text())
         .arg(kindText(m_cur.kind))
-        .arg(m_cur.plate)
-        .arg(m_cur.cardNo));
+        .arg(m_cur.plate));
 }
 
 void LaneWindow::startPresent()
 {
     setState(LS_PRESENTING);
-    sendCmd(CMD_PRESENT_CARD, QByteArray());
-}
-
-void LaneWindow::startRetract()
-{
-    setState(LS_RETRACTING);
-    sendCmd(CMD_RETRACT_CARD, QByteArray());
+    sendCmd(CMD_PRESENT_CARD, QByteArray(1, (char)m_curPos));
+    log(QString::fromUtf8("送卡: %1 工位").arg(posText(m_curPos)));
 }
 
 void LaneWindow::doRecycle(int reason)
 {
     // 脏点: 好几个地方调过来, 每次意图都不一样, 回收完该干嘛全靠外面判断
     setState(LS_RECOVERING);
-    sendCmd(CMD_RECYCLE_CARD, QByteArray(1, (char)reason));
+    QByteArray p;
+    p.append((char)m_curPos);
+    p.append((char)reason);
+    sendCmd(CMD_RECYCLE_CARD, p);
 }
 
 void LaneWindow::finishVehicle(int result, const QString &remark)
@@ -998,10 +1158,11 @@ void LaneWindow::finishVehicle(int result, const QString &remark)
     m_flows.prepend(m_cur);
     appendFlowRow(m_cur);
 
-    log(QString::fromUtf8("[流水] %1 %2 %3 卡号%4 -> %5")
+    log(QString::fromUtf8("[流水] %1 %2 %3 工位%4 卡号%5 -> %6")
         .arg(m_cur.seq)
         .arg(m_cur.plate)
         .arg(kindText(m_cur.kind))
+        .arg(posText(m_curPos))
         .arg(m_cur.cardNo)
         .arg(resText(result)));
 }
@@ -1012,7 +1173,6 @@ void LaneWindow::enterFault(int rc, const QString &what)
     m_takeTimer->stop();
 
     setState(LS_FAULT);
-    m_errCode = rc;
     m_alarmLbl->setText(QString::fromUtf8("故障: ") + what);
     m_alarmLbl->setStyleSheet("color:#c00; font-weight:bold;");
     showScreen(QString::fromUtf8("设备故障，请联系工作人员"));
@@ -1021,13 +1181,12 @@ void LaneWindow::enterFault(int rc, const QString &what)
     // 本车按"已中止"记一笔 (旧版记成"已回收", 其实卡还在机构里)
     finishVehicle(RES_ABORTED, what);
     log(QString::fromUtf8("处理完现场后点[故障恢复 / 跳过本车], 否则下一辆车发不出去"));
-    updateHead();
 }
 
 void LaneWindow::finishRecover()
 {
     if (!m_recovering)
-        return;             // EV_RECYCLED 和兜底定时器只认第一个
+        return;             // EV 和兜底定时器只认第一个
 
     m_recovering = false;
 
@@ -1040,9 +1199,10 @@ void LaneWindow::finishRecover()
     m_carPresent = false;
     m_retry = 0;
     m_voiceCount = 0;
-    m_errCode = 0;
-    m_devState = DEV_IDLE;
-    m_slotPos = SLOT_IN;
+    m_stretch = STRETCH_IN;
+
+    for (int i = 1; i <= POS_COUNT; ++i)
+        m_posState[i] = PS_EMPTY;
 
     if (m_barrierUp)
     {
@@ -1054,12 +1214,14 @@ void LaneWindow::finishRecover()
     finishVehicle(RES_ABORTED, QString::fromUtf8("故障恢复, 本车中止"));
 
     m_cur = VehicleRecord();
+    m_curPos = 0;
     setState(LS_IDLE);
     showScreen(QString::fromUtf8("欢迎光临"));
     m_alarmLbl->setText(QString::fromUtf8("已恢复, 可接待下一辆车"));
     m_alarmLbl->setStyleSheet("color:#0a0;");
     updateVehiclePanel();
     updateLaneView();
+    updatePosTable();
     updateHead();
 
     log(QString::fromUtf8("故障恢复完成, 车道已清空"));
@@ -1102,7 +1264,6 @@ void LaneWindow::onTakeTimeout()
 
     if (m_voiceCount <= 2)
     {
-        // 第一次超时: 再催一次
         showScreen(QString::fromUtf8("请取卡"));
         playVoice(VOICE_PLEASE_TAKE);
         log(QString::fromUtf8("超时未取卡, 第 %1 次重复提示").arg(m_voiceCount));
@@ -1110,7 +1271,6 @@ void LaneWindow::onTakeTimeout()
         return;
     }
 
-    // 第二次还超时: 回收, 报人工
     log(QString::fromUtf8("超时未取卡, 回收卡片"));
     showScreen(QString::fromUtf8("卡片已回收，请联系工作人员"));
     playVoice(VOICE_RECYCLED);
@@ -1131,35 +1291,47 @@ void LaneWindow::onManualSelftest()
 
 void LaneWindow::onManualPrepare()
 {
-    // 脏点: 手动命令不维护 m_state, 点两下就能把自动流程搞乱
-    sendCmd(CMD_PREPARE_CARD, QByteArray(1, (char)1));
+    // 脏点: 循环发 4 条命令, 共用同一个超时定时器, 后一条把前一条的超时顶掉
+    for (int i = 1; i <= POS_COUNT; ++i)
+        sendCmd(CMD_PREPARE_CARD, QByteArray(1, (char)i));
 }
 
 void LaneWindow::onManualWrite()
 {
+    int pos = m_curPos > 0 ? m_curPos : 1;
     QString plate = m_cur.plate.isEmpty() ? QString::fromUtf8("苏A00000") : m_cur.plate;
     int kind = m_cur.kind > 0 ? m_cur.kind : 1;
-    QString cardNo = m_cur.cardNo.isEmpty() ? QString("00000000") : m_cur.cardNo;
+    QString cardNo = m_posCard[pos].isEmpty() ? QString("00000000") : m_posCard[pos];
     QString t = QDateTime::currentDateTime().toString("yyyyMMddhhmmss");
 
-    QByteArray data = packEntryData(m_stationEdit->text(), m_laneEdit->text(),
-                                    kind, plate, t, cardNo);
+    QByteArray data;
+    data.append((char)pos);
+    data.append(packEntryData(m_stationEdit->text(), m_laneEdit->text(),
+                              kind, plate, t, cardNo));
     sendCmd(CMD_WRITE_CARD, data);
 }
 
 void LaneWindow::onManualPresent()
 {
-    sendCmd(CMD_PRESENT_CARD, QByteArray());
+    int pos = m_curPos > 0 ? m_curPos : 1;
+    sendCmd(CMD_PRESENT_CARD, QByteArray(1, (char)pos));
 }
 
 void LaneWindow::onManualRetract()
 {
-    sendCmd(CMD_RETRACT_CARD, QByteArray());
+    int pos = m_curPos > 0 ? m_curPos : 1;
+    sendCmd(CMD_RETRACT_CARD, QByteArray(1, (char)pos));
+    m_stretch = STRETCH_IN;
+    updateLaneView();
 }
 
 void LaneWindow::onManualRecycle()
 {
-    sendCmd(CMD_RECYCLE_CARD, QByteArray(1, (char)RECYCLE_MANUAL));
+    int pos = m_curPos > 0 ? m_curPos : 1;
+    QByteArray p;
+    p.append((char)pos);
+    p.append((char)RECYCLE_MANUAL);
+    sendCmd(CMD_RECYCLE_CARD, p);
 }
 
 void LaneWindow::onManualVoice()
@@ -1193,11 +1365,21 @@ void LaneWindow::onResetDev()
     m_takeTimer->stop();
     m_retry = 0;
     m_voiceCount = 0;
-    m_errCode = 0;
     m_alarmLbl->setText(QString::fromUtf8("无"));
     m_alarmLbl->setStyleSheet("color:#0a0;");
     setState(LS_IDLE);
     updateHead();
+}
+
+void LaneWindow::onClearFlow()
+{
+    // 脏点: 正在处理的那辆车能被清掉, 流水号和界面就对不上了
+    m_flows.clear();
+    m_table->setRowCount(0);
+    m_seq = 0;
+    m_cur = VehicleRecord();
+    updateVehiclePanel();
+    log(QString::fromUtf8("流水已清空"));
 }
 
 void LaneWindow::onRecoverFault()
@@ -1219,17 +1401,6 @@ void LaneWindow::onRecoverFault()
 
     log(QString::fromUtf8("开始故障恢复: 设备复位 -> 回收残留卡 -> 清空车道"));
     sendCmd(CMD_RESET, QByteArray());
-}
-
-void LaneWindow::onClearFlow()
-{
-    // 脏点: 正在处理的那辆车能被清掉, 流水号和界面就对不上了
-    m_flows.clear();
-    m_table->setRowCount(0);
-    m_seq = 0;
-    m_cur = VehicleRecord();
-    updateVehiclePanel();
-    log(QString::fromUtf8("流水已清空"));
 }
 
 // ============================================================================

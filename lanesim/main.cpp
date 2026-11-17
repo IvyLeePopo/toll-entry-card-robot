@@ -26,9 +26,10 @@ int main(int argc, char *argv[])
     QCoreApplication app(argc, argv);
 
     int port = 6000;
-    int bin = 500;
+    int bin = 150;
     double fail = 0.02;
     double jam = 0.01;
+    double prep = 0.02;
     int autoSec = 0;
     bool noTake = false;
 
@@ -45,18 +46,20 @@ int main(int argc, char *argv[])
             fail = args.at(++i).toDouble();
         else if (a == "--jam" && i + 1 < args.size())
             jam = args.at(++i).toDouble();
+        else if (a == "--prep" && i + 1 < args.size())
+            prep = args.at(++i).toDouble();
         else if (a == "--auto" && i + 1 < args.size())
             autoSec = args.at(++i).toInt();
         else if (a == "--notake")
             noTake = true;
         else if (a == "-h" || a == "--help")
         {
-            qDebug() << "usage: LaneSim [--port 6000] [--bin 500] [--fail 0.02] [--jam 0.01] [--auto 10]";
+            qDebug() << "usage: LaneSim [--port 6000] [--bin 150] [--fail 0.02] [--jam 0.01] [--prep 0.02] [--auto 10] [--notake]";
             return 0;
         }
     }
 
-    SimDevice::setConfig(bin, fail, jam);
+    SimDevice::setConfig(bin, fail, jam, prep);
 
     SimServer server;
     if (!server.listen(QHostAddress::Any, port))
@@ -67,9 +70,10 @@ int main(int argc, char *argv[])
 
     qDebug() << "=============== LaneSim v0 (toll entrance card dispenser) ===============";
     qDebug() << " port      :" << port;
-    qDebug() << " card bin  :" << bin;
+    qDebug() << " card bin  :" << bin << "per position";
     qDebug() << " write fail:" << fail;
     qDebug() << " jam rate  :" << jam;
+    qDebug() << " prep fail :" << prep;
     qDebug() << " auto car  :" << (autoSec > 0 ? QString::number(autoSec) + "s" : QString("off"));
     qDebug() << "------------------------------------------------------------------------";
     qDebug() << " waiting for LaneCtl to connect, then type commands below";

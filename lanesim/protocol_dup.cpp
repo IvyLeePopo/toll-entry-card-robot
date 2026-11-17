@@ -66,42 +66,79 @@ QString rcText(int rc)
     // 脏点: 和上位机那份文案已经不一样了
     if (rc == RC_OK)
         return QString::fromUtf8("OK");
-    if (rc == RC_BIN_EMPTY)
-        return QString::fromUtf8("BIN_EMPTY");
+    if (rc == RC_NO_CARD)
+        return QString::fromUtf8("NO_CARD");
     if (rc == RC_JAM)
         return QString::fromUtf8("JAM");
     if (rc == RC_WRITE_FAIL)
         return QString::fromUtf8("WRITE_FAIL");
     if (rc == RC_BAD_STATE)
         return QString::fromUtf8("BAD_STATE");
-    if (rc == RC_UNKNOWN_CMD)
-        return QString::fromUtf8("UNKNOWN_CMD");
+    if (rc == RC_NO_POS)
+        return QString::fromUtf8("NO_POS");
+    if (rc == RC_NOT_READY)
+        return QString::fromUtf8("NOT_READY");
     return QString::fromUtf8("RC_%1").arg(rc);
 }
 
-QString devStateText(int st)
+QString posText(int pos)
 {
-    if (st == DEV_IDLE)
-        return QString::fromUtf8("IDLE");
-    if (st == DEV_SELFTEST)
-        return QString::fromUtf8("SELFTEST");
-    if (st == DEV_PREPARING)
-        return QString::fromUtf8("PREPARING");
-    if (st == DEV_WRITING)
-        return QString::fromUtf8("WRITING");
-    if (st == DEV_PRESENTING)
-        return QString::fromUtf8("PRESENTING");
-    if (st == DEV_WAIT_TAKE)
-        return QString::fromUtf8("WAIT_TAKE");
-    if (st == DEV_RETRACTING)
-        return QString::fromUtf8("RETRACTING");
-    if (st == DEV_RECYCLING)
-        return QString::fromUtf8("RECYCLING");
-    if (st == DEV_NO_CARD)
-        return QString::fromUtf8("NO_CARD");
-    if (st == DEV_FAULT)
+    if (pos == POS_UP_LEFT)
+        return QString::fromUtf8("UP-L");
+    if (pos == POS_UP_RIGHT)
+        return QString::fromUtf8("UP-R");
+    if (pos == POS_DOWN_LEFT)
+        return QString::fromUtf8("DN-L");
+    if (pos == POS_DOWN_RIGHT)
+        return QString::fromUtf8("DN-R");
+    return QString::fromUtf8("POS%1").arg(pos);
+}
+
+QString posStateText(int st)
+{
+    if (st == PS_EMPTY)
+        return QString::fromUtf8("EMPTY");
+    if (st == PS_READY)
+        return QString::fromUtf8("READY");
+    if (st == PS_FAILED)
+        return QString::fromUtf8("FAILED");
+    if (st == PS_SENT)
+        return QString::fromUtf8("SENT");
+    if (st == PS_FAULT)
         return QString::fromUtf8("FAULT");
     return QString::fromUtf8("ST_%1").arg(st);
+}
+
+QString devSummaryText(int st)
+{
+    if (st == DS_NORMAL)
+        return QString::fromUtf8("NORMAL");
+    if (st == DS_PARTIAL)
+        return QString::fromUtf8("PARTIAL");
+    if (st == DS_ALLDOWN)
+        return QString::fromUtf8("ALLDOWN");
+    return QString::fromUtf8("DS_%1").arg(st);
+}
+
+QString eventText(int ev)
+{
+    if (ev == EV_CAR_ARRIVED)
+        return QString::fromUtf8("car arrived");
+    if (ev == EV_CAR_LEFT)
+        return QString::fromUtf8("car left");
+    if (ev == EV_CARD_TAKEN)
+        return QString::fromUtf8("card taken");
+    if (ev == EV_PREPARE_RECOVER)
+        return QString::fromUtf8("prepare recovered");
+    if (ev == EV_LEFT_NO_CARD)
+        return QString::fromUtf8("left without card");
+    if (ev == EV_POS_NO_CARD)
+        return QString::fromUtf8("pos no card");
+    if (ev == EV_POS_LOW)
+        return QString::fromUtf8("pos low");
+    if (ev == EV_POS_FAULT)
+        return QString::fromUtf8("pos fault");
+    return QString::fromUtf8("ev %1").arg(ev);
 }
 
 QString voiceText(int id)
@@ -162,5 +199,6 @@ bool unpackEntryData(const QByteArray &p, QString *station, QString *lane, int *
         *timeStr = QString::fromLocal8Bit(d.time, sizeof(d.time)).trimmed();
     if (cardNo)
         *cardNo = QString::fromLocal8Bit(d.cardNo, sizeof(d.cardNo)).trimmed();
+
     return true;
 }
