@@ -74,6 +74,7 @@
 #define RC_UNKNOWN_CMD    7
 #define RC_NO_POS         8     // 工位号不存在
 #define RC_NOT_READY      9     // 该工位还没备卡, 不能送
+#define RC_ABORT          10    // 连接断开导致命令中止
 
 // ------------------------- 事件码 (B3) -------------------------
 #define EV_CAR_ARRIVED    1     // 车辆压触发线圈

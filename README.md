@@ -1,8 +1,18 @@
-# 高速公路入口自动发卡车道 v0 —— 故意写脏的基线工程
+# 高速公路入口自动发卡车道 —— 从脏基线到分层核心库
 
-> 6 个月「C++ → Qt → 通信核心库」路线的**起点**。
+> 6 个月「C++ → Qt → 通信核心库」路线的工程仓库。
 > A 阶段：已按四川现场业务对齐 —— **4 工位 / B1·B2·B3 三类上行 / 心跳 / 时间同步 / 伸缩机构**。
-> 从 W1 开始，四周只在它身上做一件事：重构。
+> W1 已完成：**线程池 + 命令异步化 + 去掉轮询线程 + 日志异步落盘**。
+
+## 进度
+
+| 版本 | 内容 | 标签 |
+|---|---|---|
+| v0 | 脏基线（单工位，自制 AA55 帧） | `v0-dirty` |
+| v0-A | 4 工位 / B1·B2·B3 / 心跳 / 时间同步 | — |
+| **v1-w1** | **W1：并发与资源管理重构（当前）** | `w1-done` |
+| v1 | W2~W4：传输层 / 状态机 / lane_core + CMake | 待做 |
+
 
 ---
 
@@ -75,19 +85,24 @@
 
 ```
 studySixMonth/
+├─ lane_core/                  不依赖 Qt 的核心件 (W4 会做成静态库)
+│  ├─ ThreadPool.h/.cpp        线程池: thread+mutex+condition_variable+atomic
+│  └─ CommandTracker.h/.cpp    命令-结果配对 + 超时 (promise/future)
 ├─ lanectl/                    车道控制上位机 (Qt Widgets)
 │  ├─ LaneCtl.pro
-│  ├─ main.cpp
-│  ├─ lanewindow.h/.cpp        界面 + 通信 + 协议分发 + 车道流程 (1200+ 行)
+│  ├─ main.cpp                 支持 --connect <host> <port> 自动连接
+│  ├─ lanewindow.h/.cpp        界面 + 通信 + 协议分发 + 车道流程
 │  ├─ protocol.h/.cpp          组帧/解帧/工位与事件定义/入口信息打包
 │  ├─ vehicle.h/.cpp           通行流水
-│  └─ logger.h/.cpp            文件日志
+│  └─ logger.h/.cpp            异步日志 (分级 / 有界队列 / UTF-8)
 ├─ lanesim/                    机器人模拟器 (控制台)
 │  ├─ LaneSim.pro
 │  ├─ main.cpp                 命令行参数 + 控制台命令
 │  ├─ console.cpp              Windows conio 键盘轮询
 │  ├─ simserver.h/.cpp         4 工位/卡箱/伸缩/读卡 的假实现
 │  └─ protocol_dup.h/.cpp      ← 协议的第二份拷贝, 故意的
+├─ tools/
+│  └─ lane_core_test/          并发件验收程序 (1000 任务 / 超时 / 断线)
 ├─ bin/                        编译产物
 └─ README.md
 ```
@@ -105,7 +120,11 @@ qmake ..\..\lanectl\LaneCtl.pro; mingw32-make -j4
 mkdir ..\lanesim -Force; cd ..\lanesim
 qmake ..\..\lanesim\LaneSim.pro; mingw32-make -j4
 
-cd ..\..; dir bin     # LaneCtl.exe  LaneSim.exe
+# 并发件验收程序 (纯 C++, 不链接 Qt)
+mkdir ..\lane_core_test -Force; cd ..\lane_core_test
+qmake ..\..\tools\lane_core_test\lane_core_test.pro; mingw32-make -j4
+
+cd ..\..; dir bin     # LaneCtl.exe  LaneSim.exe  lane_core_test.exe
 ```
 
 > **Linux 上编译必然失败，这是故意的**：`logger.cpp` 写死 `C:\TollLane\logs`，
@@ -119,6 +138,9 @@ cd ..\..; dir bin     # LaneCtl.exe  LaneSim.exe
 ```powershell
 .\bin\LaneSim.exe --auto 8      # 8 秒来一辆车，全自动演示
 .\bin\LaneCtl.exe               # 点[连接]，然后什么都不用做
+
+# 也可以启动即连接（演示 / 自动化测试用）
+.\bin\LaneCtl.exe --connect 127.0.0.1 6000
 ```
 
 界面上能直接看到：4 个工位的状态和卡数、当前用的工位、伸缩机构、信息屏、流水。
@@ -140,6 +162,7 @@ status | s      打印 4 个工位状态         help   | h     帮助
 .\bin\LaneSim.exe --fail 1           # 写卡必失败 -> 车道换工位重试 -> 报故障
 .\bin\LaneSim.exe --jam 1            # 分卡卡滞
 .\bin\LaneSim.exe --auto 8 --notake  # 车都不取卡, 看"未取卡驶离"回收
+.\bin\LaneSim.exe --auto 1 --speed 15   # 机械动作 15% 耗时, 用于长跑压测
 ```
 
 界面上也有 **[模拟来车] [模拟取卡] [模拟驶离]** 三个按钮，不用切控制台 —— 它们发 `CMD_DEBUG` 给模拟器，事件仍然由设备上报，不会伪造。
@@ -210,12 +233,12 @@ Select-String -Path lanectl\*.cpp,lanectl\*.h,lanesim\*.cpp,lanesim\*.h -Pattern
 
 | # | 坑 | 位置 | 为什么是坑 | 哪周收拾 |
 |---|---|---|---|---|
-| 1 | `StatusPoller` 裸 `new`，析构只 stop 不 delete | `lanewindow.cpp` | 每次退出泄漏 | **W1** |
-| 2 | `new char[512]` 手工发送缓冲 | `sendCmd` | 多余拷贝 + 超 511 截断 | **W1** |
-| 3 | `volatile bool` 当停止标志 | `StatusPoller` | 不是同步原语 | **W1** |
-| 4 | 单例 Logger 无锁、每条 fflush | `logger.cpp` | 多线程乱序 | **W1** |
-| 5 | 整个车道流程跑在 UI 线程 | 全局 | 等设备期间界面不响应 | **W1** |
-| 6 | 设备已有 20s 心跳，还另开线程 2s 轮询 | `StatusPoller` | 两份状态获取路径 | **W1** |
+| 1 | ~~`StatusPoller` 裸 `new`，析构只 stop 不 delete~~ | — | **已修 W1**：轮询线程整个删掉 | ✅ |
+| 2 | ~~`new char[512]` 手工发送缓冲~~ | — | **已修 W1**：直接写 QByteArray | ✅ |
+| 3 | ~~`volatile bool` 当停止标志~~ | — | **已修 W1**：改用 `std::atomic` | ✅ |
+| 4 | ~~单例 Logger 无锁、每条 fflush~~ | — | **已修 W1**：有界队列 + 后台线程落盘 | ✅ |
+| 5 | 整个车道流程跑在 UI 线程 | 全局 | 等设备期间界面不响应（现在只等 UI 更新，协议层已异步） | W2 |
+| 6 | ~~设备已有 20s 心跳，还另开线程 2s 轮询~~ | — | **已修 W1**：轮询删除，只靠心跳 + 状态推送 | ✅ |
 | 7 | `QTcpSocket` 直接写进窗口类 | 全文件 | 换传输层要改整个窗口 | **W2** |
 | 8 | 组帧/解帧/分发全在一个槽 | `onReadyRead` | 没法单测，没有 FrameParser | **W2** |
 | 9 | 帧头错位就清空整个缓冲 | `protocol.cpp` | 错一帧丢后面几帧 | W2 |
@@ -247,7 +270,7 @@ Select-String -Path lanectl\*.cpp,lanectl\*.h,lanesim\*.cpp,lanesim\*.h -Pattern
 1. **车辆滞留会覆盖上一个流程**：车还没走又来一辆，`EV_CAR_ARRIVED` 直接重置 `m_cur`，上一辆流水消失。真实车道必须锁车道并报警。
 2. **故障后必须人工救场**：`enterFault` 只是停下报警，车道那辆车还占着位。必须点[故障恢复]。
 3. **恢复链用固定延时兜底**：复位完如果没有残留卡，就没有回收结果，靠 `singleShot(1200)` 硬等。
-4. **超时定时器不分命令**：全用 8 秒，设备慢一点就误判故障。
+4. ~~**超时定时器不分命令**~~ → **W1 已修**：每条命令一个 waiter + 独立 deadline，超时能定位到具体命令字。
 5. **断开连接不做收尾**：不落杆、不回收卡，设备还在等取卡。
 6. **清流水可清掉正在跑的车**：`onClearFlow` 不判断 `m_cur`。
 7. **坏帧即丢包**：`parseFrame` 返回 -1 后清空缓冲，半包会连带丢掉后面的完整帧。
@@ -259,14 +282,25 @@ Select-String -Path lanectl\*.cpp,lanectl\*.h,lanesim\*.cpp,lanesim\*.h -Pattern
 
 ## 9. 四周重构任务（对齐原始计划）
 
-### W1 现代 C++ / 并发
+### W1 现代 C++ / 并发 —— ✅ 已完成（标签 `w1-done`）
 
-- [ ] `m_poller` / `m_txBuf` / 流水容器换成 `std::unique_ptr` / `std::vector`
-- [ ] 不依赖 Qt 的线程池（`std::thread` + `mutex` + `condition_variable` + `std::atomic`）
-- [ ] 「发命令 + 等 B1 + 超时」抽成异步任务，删掉 `StatusPoller`（心跳已经够用）
-- [ ] Logger 加锁 + 分级 + 异步落盘
+- [x] 自管对象全部换成 `std::unique_ptr`（`m_pool` / `m_tracker`），删掉手工 `char[512]` 缓冲与 `StatusPoller`
+- [x] 不依赖 Qt 的线程池：`lane_core/ThreadPool`（`std::thread` + `mutex` + `condition_variable` + `atomic` + `packaged_task`）
+- [x] 「发命令 + 等 B1 + 超时」抽成异步任务：`lane_core/CommandTracker`（`promise/future`），每条命令独立计时，结果经 `QMetaObject::invokeMethod` 回到 UI 线程
+- [x] Logger 加锁 + 四级（D/I/W/E）+ 有界队列（4096）+ 后台线程落盘 + 日志文件改 UTF-8
+- [x] 顺手加了 `--speed`（模拟器动作加速）和 `--connect`（启动即连），为了能做长跑压测
 
-**验收**：线程池 demo（1000 个任务能取回结果）；`grep "new "` 只剩 `make_unique`；连发 100 张卡不崩、退出内存回落。
+**验收结果**（本机实测）
+
+| 项 | 结果 |
+|---|---|
+| `lane_core_test` | 19 项全过：1000 任务 2ms、峰值并发 4、异常穿透、超时/断线/同命令多条 |
+| 连发 | **112 张卡 / 225 秒**，已发卡 112、回收 0、超时 0、故障 0 |
+| 稳定性 | 全程 GUI 存活，工作集 54 MB |
+| 资源 | 无显式 `delete`、无手工缓冲、无轮询线程；Qt 控件保留 `new`（由父子树托管） |
+
+**注**：`grep "new "` 不会只剩 `make_unique` —— Qt 的控件/布局靠父子树释放，用 `new` 是官方写法。
+这一条的真实验收标准应该是「**非 Qt 托管的对象 100% 用智能指针**」，已经满足。
 
 ### W2 网络编程
 
@@ -334,6 +368,7 @@ git diff --stat v0-dirty HEAD
 ## 12. 注意
 
 - 控制台里的中文可能乱码（源码 UTF-8 / 控制台 GBK），**GUI 显示正常**。
+- **日志文件是 UTF-8**（W1 改的，之前跟着系统区域设置走），用 VSCode/记事本打开都正常。
 - `bin/` `build/` 不进版本库。
 - 这一版**没有单元测试**，W4 建 CMake 时一起补。
 - 模拟器的机械耗时（备卡 900ms、写卡 700ms、送卡 600/800ms）是写死常数，没有配置文件。

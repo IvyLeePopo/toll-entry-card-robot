@@ -1,6 +1,8 @@
 #include "lanewindow.h"
 #include "logger.h"
 #include "protocol.h"
+#include "CommandTracker.h"
+#include "ThreadPool.h"
 
 #include <QBrush>
 #include <QColor>
@@ -18,9 +20,11 @@
 #include <QTableWidgetItem>
 #include <QStringList>
 #include <QTextEdit>
-#include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
+
+#include <chrono>
+#include <memory>
 #include <string.h>
 
 #ifdef Q_OS_WIN
@@ -37,35 +41,8 @@ static void setLamp(QLabel *l, bool on)
                         : "color:#c0c0c0; font-size:20px;");
 }
 
-// ============================================================================
-//  状态轮询线程
-//  脏点:
-//    1. 设备本来每 20 秒就主动发心跳, 这里又开一个线程每 2 秒查状态
-//    2. volatile bool 当停止标志, 不是同步原语
-//   -> W1 用线程池 + std::atomic 换掉
-// ============================================================================
-class StatusPoller : public QThread
-{
-public:
-    explicit StatusPoller(LaneWindow *w) : m_w(w), m_run(true) {}
-    void stop() { m_run = false; }
-
-protected:
-    void run()
-    {
-        while (m_run)
-        {
-            QThread::msleep(2000);
-            if (!m_run)
-                break;
-            QMetaObject::invokeMethod(m_w, "onPollTick", Qt::QueuedConnection);
-        }
-    }
-
-private:
-    LaneWindow *m_w;
-    volatile bool m_run;
-};
+// 命令默认超时 (每条命令各自计时, 不再共用一个 QTimer)
+static const int kCmdTimeoutMs = 8000;
 
 // ----------------------------------------------------------------------------
 
@@ -75,16 +52,12 @@ LaneWindow::LaneWindow(QWidget *parent)
     // 脏点: 成员初始化散在构造函数 / buildUi / onConnected 三处
     m_sock = new QTcpSocket(this);
 
-    m_cmdTimer = new QTimer(this);
-    m_cmdTimer->setSingleShot(true);
+    m_pool = std::make_unique<ThreadPool>(4);
+    m_tracker = std::make_unique<CommandTracker>();
+
     m_takeTimer = new QTimer(this);
     m_takeTimer->setSingleShot(true);
     m_heartTimer = new QTimer(this);
-
-    m_txBuf = new char[512];          // 脏点: 手工缓冲, 长度写死
-    memset(m_txBuf, 0, 512);
-
-    m_poller = new StatusPoller(this);
 
     m_state = LS_IDLE;
     m_seq = 0;
@@ -112,7 +85,6 @@ LaneWindow::LaneWindow(QWidget *parent)
     connect(m_sock, SIGNAL(error(QAbstractSocket::SocketError)),
             this, SLOT(onSockError(QAbstractSocket::SocketError)));
 
-    connect(m_cmdTimer, SIGNAL(timeout()), this, SLOT(onCmdTimeout()));
     connect(m_takeTimer, SIGNAL(timeout()), this, SLOT(onTakeTimeout()));
     connect(m_heartTimer, SIGNAL(timeout()), this, SLOT(onHeartCheck()));
 
@@ -136,7 +108,6 @@ LaneWindow::LaneWindow(QWidget *parent)
     connect(m_bSimTake, SIGNAL(clicked()), this, SLOT(onSimTakeCard()));
     connect(m_bSimLeave, SIGNAL(clicked()), this, SLOT(onSimCarLeave()));
 
-    m_poller->start();
     m_heartTimer->start(5000);
 
     showScreen(QString::fromUtf8("欢迎光临"));
@@ -147,12 +118,8 @@ LaneWindow::LaneWindow(QWidget *parent)
 LaneWindow::~LaneWindow()
 {
     // 脏点: 关程序时设备可能还在动, 不回收卡也不落杆
-    if (m_poller)
-    {
-        m_poller->stop();
-        m_poller->wait(3000);
-    }
-    delete[] m_txBuf;
+    if (m_pool)
+        m_pool->shutdown();
 }
 
 // ============================================================================
@@ -589,6 +556,15 @@ void LaneWindow::setState(int st)
 //  连接
 // ============================================================================
 
+void LaneWindow::autoConnect(const QString &host, int port)
+{
+    m_ipEdit->setText(host);
+    m_portEdit->setText(QString::number(port));
+
+    // 等窗口画出来再连, 否则日志控件还没创建
+    QTimer::singleShot(600, this, SLOT(onConnect()));
+}
+
 void LaneWindow::onConnect()
 {
     if (m_sock->state() != QAbstractSocket::UnconnectedState)
@@ -623,7 +599,6 @@ void LaneWindow::onConnected()
 
 void LaneWindow::onDisconnect()
 {
-    m_cmdTimer->stop();
     m_takeTimer->stop();
     m_sock->disconnectFromHost();
     log(QString::fromUtf8("主动断开连接"));
@@ -642,8 +617,11 @@ void LaneWindow::onDisconnected()
         m_posBin[i] = -1;
     }
     m_buf.clear();
-    m_cmdTimer->stop();
     m_takeTimer->stop();
+
+    // 断线时把所有还没回来的命令一次性失败掉, 别让工作线程干等到超时
+    if (m_tracker)
+        m_tracker->failAllPending(RC_ABORT);
 
     log(QString::fromUtf8("连接已断开"));
     if (m_state != LS_IDLE)
@@ -657,14 +635,6 @@ void LaneWindow::onSockError(QAbstractSocket::SocketError e)
 {
     // 脏点: 不区分错误类型, 不重连, 不提示处理办法
     log(QString::fromUtf8("socket 错误(%1): %2").arg((int)e).arg(m_sock->errorString()));
-}
-
-void LaneWindow::onPollTick()
-{
-    if (m_sock->state() != QAbstractSocket::ConnectedState)
-        return;
-    // 脏点: 绕过 sendCmd 直接写, 免得打乱流程超时定时器; 同一动作两套发送路径
-    m_sock->write(buildFrame(CMD_GET_STATUS, QByteArray()));
 }
 
 void LaneWindow::onHeartCheck()
@@ -722,7 +692,14 @@ void LaneWindow::onReadyRead()
                 log(QString::fromUtf8("结果帧长度不够, 丢弃"));
                 continue;
             }
-            onResult((unsigned char)payload.at(0), (unsigned char)payload.at(1));
+
+            // 只负责"兑现", 真正的业务处理在工作线程唤醒后回到界面线程做
+            int rcmd = (unsigned char)payload.at(0);
+            int rrc = (unsigned char)payload.at(1);
+            if (!m_tracker->complete(rcmd, rrc))
+            {
+                // 语音/屏显/栏杆/查状态这类 fire-and-forget 命令也会回 B1, 直接忽略
+            }
         }
         else if (cmd == CMD_STATE)
         {
@@ -786,27 +763,58 @@ void LaneWindow::sendCmd(int cmd, const QByteArray &payload)
 
     QByteArray f = buildFrame(cmd, payload);
 
-    // 脏点: 多余的一次拷贝, 长度还写死 512
-    memset(m_txBuf, 0, 512);
-    memcpy(m_txBuf, f.constData(), f.size() > 511 ? 511 : f.size());
-    m_sock->write(m_txBuf, f.size());
+    // 先登记 waiter 再写 socket: 设备回得快也不会漏掉
+    CommandTracker::Waiter waiter = m_tracker->begin(cmd);
+
+    m_sock->write(f);
     m_sock->flush();
 
-    // 脏点: 备卡 0.9 秒、写卡 0.7 秒、送卡 0.8 秒, 全用 8 秒超时
-    m_cmdTimer->start(8000);
-
     log(QString::fromUtf8(">> CMD=0x%1 len=%2").arg(cmd, 2, 16, QChar('0')).arg(f.size()));
+
+    // 把"等结果 + 超时"丢给线程池, 界面线程不再被定时器绑住
+    m_pool->submit([this, waiter = std::move(waiter)]() mutable {
+        CmdResult r;
+
+        if (waiter.future.wait_for(std::chrono::milliseconds(kCmdTimeoutMs)) ==
+            std::future_status::ready)
+        {
+            r = waiter.future.get();
+        }
+        else
+        {
+            m_tracker->drop(waiter.id);
+            r.cmd = waiter.cmd;
+            r.rc = RC_TIMEOUT;
+            r.timeout = true;
+        }
+
+        // 结果必须回到界面线程再动 UI / 状态机
+        QMetaObject::invokeMethod(this, [this, r]() { onCmdDone(r); }, Qt::QueuedConnection);
+    });
 }
 
 void LaneWindow::sendFire(int cmd, const QByteArray &payload)
 {
-    // 脏点: 和 sendCmd 几乎一样, 只是不启定时器. 复制粘贴出来的第二套发送逻辑
+    // 不需要结果的通知类命令 (语音/屏显/栏杆/查状态/调试), 只发不等
     if (m_sock->state() != QAbstractSocket::ConnectedState)
         return;
 
     QByteArray f = buildFrame(cmd, payload);
     m_sock->write(f);
     m_sock->flush();
+}
+
+void LaneWindow::onCmdDone(const CmdResult &r)
+{
+    if (r.timeout)
+    {
+        // 脏点: 还是不知道设备卡在哪一步, 只知道"超时了"
+        log(QString::fromUtf8("命令 0x%1 超时").arg(r.cmd, 2, 16, QChar('0')));
+        enterFault(RC_TIMEOUT, QString::fromUtf8("等待设备响应超时"));
+        return;
+    }
+
+    onResult(r.cmd, r.rc);
 }
 
 void LaneWindow::sendDebug(int action)
@@ -828,7 +836,6 @@ void LaneWindow::sendDebug(int action)
 
 void LaneWindow::onResult(int cmd, int rc)
 {
-    m_cmdTimer->stop();
 
     if (rc != RC_OK)
     {
@@ -1169,7 +1176,6 @@ void LaneWindow::finishVehicle(int result, const QString &remark)
 
 void LaneWindow::enterFault(int rc, const QString &what)
 {
-    m_cmdTimer->stop();
     m_takeTimer->stop();
 
     setState(LS_FAULT);
@@ -1194,7 +1200,6 @@ void LaneWindow::finishRecover()
     if (m_sock->state() == QAbstractSocket::ConnectedState)
         sendFire(CMD_DEBUG, QByteArray(1, (char)DBG_LANE_CLEAR));
 
-    m_cmdTimer->stop();
     m_takeTimer->stop();
     m_carPresent = false;
     m_retry = 0;
@@ -1251,12 +1256,6 @@ void LaneWindow::playVoice(int id)
 // ============================================================================
 //  超时
 // ============================================================================
-
-void LaneWindow::onCmdTimeout()
-{
-    // 脏点: 不知道是哪条命令超时, 也不重发, 直接判故障
-    enterFault(RC_TIMEOUT, QString::fromUtf8("等待设备响应超时"));
-}
 
 void LaneWindow::onTakeTimeout()
 {
@@ -1361,7 +1360,6 @@ void LaneWindow::onResetDev()
     sendCmd(CMD_RESET, QByteArray());
 
     // 脏点: 复位只改了本地状态, 设备那边是不是真复位了没人确认
-    m_cmdTimer->stop();
     m_takeTimer->stop();
     m_retry = 0;
     m_voiceCount = 0;
@@ -1396,7 +1394,6 @@ void LaneWindow::onRecoverFault()
     }
 
     m_recovering = true;
-    m_cmdTimer->stop();
     m_takeTimer->stop();
 
     log(QString::fromUtf8("开始故障恢复: 设备复位 -> 回收残留卡 -> 清空车道"));

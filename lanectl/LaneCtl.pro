@@ -4,21 +4,28 @@ greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 TARGET   = LaneCtl
 TEMPLATE = app
 
-# 脏点: qmake 的 .pro 工程, 没有 CMake, 没有单元测试, 没有 CI
-CONFIG += c++11
+# W1: 并发基础件已抽到 lane_core (不依赖 Qt), W4 会把它做成独立静态库
+CONFIG += c++14
+
+CORE = $$PWD/../lane_core
+INCLUDEPATH += $$CORE
 
 SOURCES += \
     main.cpp \
     lanewindow.cpp \
     protocol.cpp \
     vehicle.cpp \
-    logger.cpp
+    logger.cpp \
+    $$CORE/ThreadPool.cpp \
+    $$CORE/CommandTracker.cpp
 
 HEADERS += \
     lanewindow.h \
     protocol.h \
     vehicle.h \
-    logger.h
+    logger.h \
+    $$CORE/ThreadPool.h \
+    $$CORE/CommandTracker.h
 
 win32 {
     # 脏点: 抄来的 lib, 一个符号都没用到

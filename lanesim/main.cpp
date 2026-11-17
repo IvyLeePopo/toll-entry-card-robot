@@ -31,6 +31,7 @@ int main(int argc, char *argv[])
     double jam = 0.01;
     double prep = 0.02;
     int autoSec = 0;
+    int speed = 100;
     bool noTake = false;
 
     // 脏点: 手写参数解析, 敲错了不报错, 静默用默认值
@@ -50,16 +51,18 @@ int main(int argc, char *argv[])
             prep = args.at(++i).toDouble();
         else if (a == "--auto" && i + 1 < args.size())
             autoSec = args.at(++i).toInt();
+        else if (a == "--speed" && i + 1 < args.size())
+            speed = args.at(++i).toInt();
         else if (a == "--notake")
             noTake = true;
         else if (a == "-h" || a == "--help")
         {
-            qDebug() << "usage: LaneSim [--port 6000] [--bin 150] [--fail 0.02] [--jam 0.01] [--prep 0.02] [--auto 10] [--notake]";
+            qDebug() << "usage: LaneSim [--port 6000] [--bin 150] [--fail 0.02] [--jam 0.01] [--prep 0.02] [--auto 10] [--speed 100] [--notake]";
             return 0;
         }
     }
 
-    SimDevice::setConfig(bin, fail, jam, prep);
+    SimDevice::setConfig(bin, fail, jam, prep, speed);
 
     SimServer server;
     if (!server.listen(QHostAddress::Any, port))
@@ -74,6 +77,7 @@ int main(int argc, char *argv[])
     qDebug() << " write fail:" << fail;
     qDebug() << " jam rate  :" << jam;
     qDebug() << " prep fail :" << prep;
+    qDebug() << " speed     :" << QString::number(speed) + "%";
     qDebug() << " auto car  :" << (autoSec > 0 ? QString::number(autoSec) + "s" : QString("off"));
     qDebug() << "------------------------------------------------------------------------";
     qDebug() << " waiting for LaneCtl to connect, then type commands below";

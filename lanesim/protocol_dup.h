@@ -64,6 +64,7 @@
 #define RC_UNKNOWN_CMD    7
 #define RC_NO_POS         8
 #define RC_NOT_READY      9
+#define RC_ABORT          10
 
 #define EV_CAR_ARRIVED    1
 #define EV_CAR_LEFT       2

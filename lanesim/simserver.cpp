@@ -11,6 +11,16 @@ static int g_binInit = 150;             // 现场每个工位 150 张
 static double g_writeFailRate = 0.02;
 static double g_jamRate = 0.01;
 static double g_prepareFailRate = 0.02;
+static int g_speed = 100;               // 机械动作速度百分比, 100=真实速度, 用于长跑压测
+
+// 把真实机械耗时按速度百分比缩放 (--speed 10 表示 10 倍速)
+static int simMs(int baseMs)
+{
+    if (g_speed <= 0)
+        g_speed = 100;
+    int v = (baseMs * g_speed) / 100;
+    return v < 1 ? 1 : v;
+}
 
 static double rand01()
 {
@@ -33,12 +43,13 @@ static QString makeCardNo()
 }
 
 void SimDevice::setConfig(int binPerPos, double writeFailRate,
-                          double jamRate, double prepareFailRate)
+                          double jamRate, double prepareFailRate, int speedPercent)
 {
     g_binInit = binPerPos;
     g_writeFailRate = writeFailRate;
     g_jamRate = jamRate;
     g_prepareFailRate = prepareFailRate;
+    g_speed = speedPercent;
 }
 
 SimDevice::SimDevice(QTcpSocket *sock, QObject *parent)
@@ -67,7 +78,7 @@ SimDevice::SimDevice(QTcpSocket *sock, QObject *parent)
     qDebug() << "[DEV] powered on, bin per pos =" << g_binInit;
 
     // 真实机器人: 上电就自己把四个工位备好, 不等车道发命令
-    QTimer::singleShot(600, this, [this]() { prepareAll(); });
+    QTimer::singleShot(simMs(600), this, [this]() { prepareAll(); });
     pushState();
 }
 
@@ -173,7 +184,7 @@ void SimDevice::prepareLater(int pos, int delayMs)
     if (pos < 1 || pos > POS_COUNT)
         return;
 
-    QTimer::singleShot(delayMs, this, [this, pos]() { onPrepared(pos); });
+    QTimer::singleShot(simMs(delayMs), this, [this, pos]() { onPrepared(pos); });
 }
 
 void SimDevice::onPrepared(int pos)
@@ -319,7 +330,7 @@ void SimDevice::handle(int cmd, const QByteArray &p)
     if (cmd == CMD_SELFTEST)
     {
         m_devState = 1;
-        QTimer::singleShot(1000, this, [this, cmd]() {
+        QTimer::singleShot(simMs(1000), this, [this, cmd]() {
             m_devState = 0;
             m_inited = 1;
             qDebug() << "[DEV] selftest ok";
@@ -332,7 +343,7 @@ void SimDevice::handle(int cmd, const QByteArray &p)
 
     if (cmd == CMD_RESET)
     {
-        QTimer::singleShot(500, this, [this, cmd]() {
+        QTimer::singleShot(simMs(500), this, [this, cmd]() {
             stretchIn();
             m_devState = 0;
             m_inited = 1;
@@ -392,7 +403,7 @@ void SimDevice::handle(int cmd, const QByteArray &p)
         int wpos = pos;
         bool fail = rand01() < g_writeFailRate;
 
-        QTimer::singleShot(700, this, [this, cmd, entry, wpos, fail]() {
+        QTimer::singleShot(simMs(700), this, [this, cmd, entry, wpos, fail]() {
             if (fail)
             {
                 qDebug() << "[DEV] inject write failure";
@@ -438,7 +449,7 @@ void SimDevice::handle(int cmd, const QByteArray &p)
             qDebug() << "[DEV] stretch out 20cm for" << posText(pos);
         }
 
-        QTimer::singleShot(delay, this, [this, cmd, pos]() {
+        QTimer::singleShot(simMs(delay), this, [this, cmd, pos]() {
             m_pos[pos].state = PS_SENT;
             qDebug() << "[DEV]" << posText(pos) << "card presented, waiting take";
             sendResult(cmd, RC_OK);
@@ -450,7 +461,7 @@ void SimDevice::handle(int cmd, const QByteArray &p)
     // ---------------- 缩卡 ----------------
     if (cmd == CMD_RETRACT_CARD)
     {
-        QTimer::singleShot(500, this, [this, cmd]() {
+        QTimer::singleShot(simMs(500), this, [this, cmd]() {
             stretchIn();
             qDebug() << "[DEV] stretch in";
             sendResult(cmd, RC_OK);
@@ -470,7 +481,7 @@ void SimDevice::handle(int cmd, const QByteArray &p)
 
         int reason = p.size() > 1 ? (unsigned char)p.at(1) : 0;
 
-        QTimer::singleShot(800, this, [this, cmd, pos, reason]() {
+        QTimer::singleShot(simMs(800), this, [this, cmd, pos, reason]() {
             m_pos[pos].state = PS_EMPTY;
             m_pos[pos].written = false;
             m_pos[pos].needRecoverNotify = true;
@@ -664,10 +675,10 @@ void SimServer::onAutoTick()
     m_autoBusy = true;
     m_dev->simulateCarArrived();
 
-    QTimer::singleShot(6000, this, [this]() {
+    QTimer::singleShot(simMs(6000), this, [this]() {
         if (m_dev && !m_noTake)
             m_dev->simulateTakeCard();
-        QTimer::singleShot(4000, this, [this]() {
+        QTimer::singleShot(simMs(4000), this, [this]() {
             if (m_dev)
                 m_dev->simulateCarLeft(!m_noTake);
             m_autoBusy = false;

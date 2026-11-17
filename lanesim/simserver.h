@@ -29,7 +29,7 @@ public:
 
     // 脏点: 参数放文件内全局变量, 多实例共享
     static void setConfig(int binPerPos, double writeFailRate,
-                          double jamRate, double prepareFailRate);
+                          double jamRate, double prepareFailRate, int speedPercent);
 
     void simulateCarArrived();
     void simulateTakeCard();

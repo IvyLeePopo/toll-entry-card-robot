@@ -7,6 +7,8 @@
 #include <QTcpSocket>
 #include <QWidget>
 
+#include <memory>
+
 #include "vehicle.h"
 
 class QLabel;
@@ -15,7 +17,9 @@ class QPushButton;
 class QTableWidget;
 class QTextEdit;
 class QTimer;
-class StatusPoller;
+class ThreadPool;
+class CommandTracker;
+struct CmdResult;
 
 // 车道流程状态 (上位机自己的)
 enum
@@ -53,6 +57,9 @@ public:
     explicit LaneWindow(QWidget *parent = 0);
     ~LaneWindow();
 
+    // 启动时自动连接 (便于自动化测试 / 演示, 不用手点[连接])
+    void autoConnect(const QString &host, int port);
+
 private slots:
     // ---- 连接 ----
     void onConnect();
@@ -61,10 +68,8 @@ private slots:
     void onDisconnected();
     void onReadyRead();
     void onSockError(QAbstractSocket::SocketError e);
-    void onPollTick();
 
     // ---- 定时器 ----
-    void onCmdTimeout();
     void onTakeTimeout();
     void onHeartCheck();
 
@@ -101,6 +106,7 @@ private:
     void sendCmd(int cmd, const QByteArray &payload);
     void sendFire(int cmd, const QByteArray &payload);
     void sendDebug(int action);
+    void onCmdDone(const CmdResult &r);
     void onResult(int cmd, int rc);
     void onState(const QByteArray &payload);
     void onEvent(int ev, int pos);
@@ -119,12 +125,11 @@ private:
 
     // ---- 通信 ----
     QTcpSocket *m_sock;
-    QTimer *m_cmdTimer;        // 命令超时 8 秒 (脏: 所有命令共用一个)
+    std::unique_ptr<ThreadPool> m_pool;
+    std::unique_ptr<CommandTracker> m_tracker;
     QTimer *m_takeTimer;       // 取卡超时 15 秒
     QTimer *m_heartTimer;      // 心跳检查 5 秒
-    StatusPoller *m_poller;
     QByteArray m_buf;
-    char *m_txBuf;             // 手工 new 的发送缓冲
     QDateTime m_lastHeart;
 
     // ---- 界面 ----
