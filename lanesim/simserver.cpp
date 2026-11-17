@@ -1,4 +1,4 @@
-#include "simserver.h"
+﻿#include "simserver.h"
 #include "protocol_dup.h"
 
 #include <QDebug>
@@ -67,12 +67,12 @@ SimDevice::SimDevice(QTcpSocket *sock, QObject *parent)
     for (int i = 1; i <= POS_COUNT; ++i)
         m_pos[i].bin = g_binInit;
 
-    connect(m_sock, SIGNAL(readyRead()), this, SLOT(onReadyRead()));
-    connect(m_sock, SIGNAL(disconnected()), this, SLOT(onDisconnected()));
+    connect(m_sock, &QTcpSocket::readyRead, this, &SimDevice::onReadyRead);
+    connect(m_sock, &QTcpSocket::disconnected, this, &SimDevice::onDisconnected);
 
     // 脏点: 心跳周期写死 20 秒, 和上位机的判定阈值是两份独立的数字
     m_heartTimer = new QTimer(this);
-    connect(m_heartTimer, SIGNAL(timeout()), this, SLOT(onHeartbeat()));
+    connect(m_heartTimer, &QTimer::timeout, this, &SimDevice::onHeartbeat);
     m_heartTimer->start(20 * 1000);
 
     qDebug() << "[DEV] powered on, bin per pos =" << g_binInit;
@@ -659,7 +659,7 @@ void SimServer::setAutoInterval(int sec)
         return;
 
     QTimer *t = new QTimer(this);
-    connect(t, SIGNAL(timeout()), this, SLOT(onAutoTick()));
+    connect(t, &QTimer::timeout, this, &SimServer::onAutoTick);
     t->start(sec * 1000);
     qDebug() << "[SIM] auto car mode on, every" << sec << "s";
 }

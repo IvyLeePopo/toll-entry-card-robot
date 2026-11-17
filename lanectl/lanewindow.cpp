@@ -79,34 +79,36 @@ LaneWindow::LaneWindow(QWidget *parent)
 
     buildUi();
 
-    connect(m_sock, SIGNAL(connected()), this, SLOT(onConnected()));
-    connect(m_sock, SIGNAL(disconnected()), this, SLOT(onDisconnected()));
-    connect(m_sock, SIGNAL(readyRead()), this, SLOT(onReadyRead()));
-    connect(m_sock, SIGNAL(error(QAbstractSocket::SocketError)),
-            this, SLOT(onSockError(QAbstractSocket::SocketError)));
+    // 新式信号槽: 编译期检查函数签名, 拼错或改签名会直接编译失败
+    connect(m_sock, &QTcpSocket::connected, this, &LaneWindow::onConnected);
+    connect(m_sock, &QTcpSocket::disconnected, this, &LaneWindow::onDisconnected);
+    connect(m_sock, &QTcpSocket::readyRead, this, &LaneWindow::onReadyRead);
+    // Qt 5.14 里 error 是重载的, 必须用 QOverload 指明取的是信号那一个
+    connect(m_sock, QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::error),
+            this, &LaneWindow::onSockError);
 
-    connect(m_takeTimer, SIGNAL(timeout()), this, SLOT(onTakeTimeout()));
-    connect(m_heartTimer, SIGNAL(timeout()), this, SLOT(onHeartCheck()));
+    connect(m_takeTimer, &QTimer::timeout, this, &LaneWindow::onTakeTimeout);
+    connect(m_heartTimer, &QTimer::timeout, this, &LaneWindow::onHeartCheck);
 
-    connect(m_connBtn, SIGNAL(clicked()), this, SLOT(onConnect()));
-    connect(m_discBtn, SIGNAL(clicked()), this, SLOT(onDisconnect()));
+    connect(m_connBtn, &QPushButton::clicked, this, &LaneWindow::onConnect);
+    connect(m_discBtn, &QPushButton::clicked, this, &LaneWindow::onDisconnect);
 
-    connect(m_bSelfTest, SIGNAL(clicked()), this, SLOT(onManualSelftest()));
-    connect(m_bPrepare, SIGNAL(clicked()), this, SLOT(onManualPrepare()));
-    connect(m_bWrite, SIGNAL(clicked()), this, SLOT(onManualWrite()));
-    connect(m_bPresent, SIGNAL(clicked()), this, SLOT(onManualPresent()));
-    connect(m_bRetract, SIGNAL(clicked()), this, SLOT(onManualRetract()));
-    connect(m_bRecycle, SIGNAL(clicked()), this, SLOT(onManualRecycle()));
-    connect(m_bVoice, SIGNAL(clicked()), this, SLOT(onManualVoice()));
-    connect(m_bUp, SIGNAL(clicked()), this, SLOT(onManualBarrierUp()));
-    connect(m_bDown, SIGNAL(clicked()), this, SLOT(onManualBarrierDown()));
-    connect(m_bReset, SIGNAL(clicked()), this, SLOT(onResetDev()));
-    connect(m_bClear, SIGNAL(clicked()), this, SLOT(onClearFlow()));
-    connect(m_bRecover, SIGNAL(clicked()), this, SLOT(onRecoverFault()));
+    connect(m_bSelfTest, &QPushButton::clicked, this, &LaneWindow::onManualSelftest);
+    connect(m_bPrepare, &QPushButton::clicked, this, &LaneWindow::onManualPrepare);
+    connect(m_bWrite, &QPushButton::clicked, this, &LaneWindow::onManualWrite);
+    connect(m_bPresent, &QPushButton::clicked, this, &LaneWindow::onManualPresent);
+    connect(m_bRetract, &QPushButton::clicked, this, &LaneWindow::onManualRetract);
+    connect(m_bRecycle, &QPushButton::clicked, this, &LaneWindow::onManualRecycle);
+    connect(m_bVoice, &QPushButton::clicked, this, &LaneWindow::onManualVoice);
+    connect(m_bUp, &QPushButton::clicked, this, &LaneWindow::onManualBarrierUp);
+    connect(m_bDown, &QPushButton::clicked, this, &LaneWindow::onManualBarrierDown);
+    connect(m_bReset, &QPushButton::clicked, this, &LaneWindow::onResetDev);
+    connect(m_bClear, &QPushButton::clicked, this, &LaneWindow::onClearFlow);
+    connect(m_bRecover, &QPushButton::clicked, this, &LaneWindow::onRecoverFault);
 
-    connect(m_bSimCar, SIGNAL(clicked()), this, SLOT(onSimCarArrive()));
-    connect(m_bSimTake, SIGNAL(clicked()), this, SLOT(onSimTakeCard()));
-    connect(m_bSimLeave, SIGNAL(clicked()), this, SLOT(onSimCarLeave()));
+    connect(m_bSimCar, &QPushButton::clicked, this, &LaneWindow::onSimCarArrive);
+    connect(m_bSimTake, &QPushButton::clicked, this, &LaneWindow::onSimTakeCard);
+    connect(m_bSimLeave, &QPushButton::clicked, this, &LaneWindow::onSimCarLeave);
 
     m_heartTimer->start(5000);
 
@@ -562,7 +564,7 @@ void LaneWindow::autoConnect(const QString &host, int port)
     m_portEdit->setText(QString::number(port));
 
     // 等窗口画出来再连, 否则日志控件还没创建
-    QTimer::singleShot(600, this, SLOT(onConnect()));
+    QTimer::singleShot(600, this, &LaneWindow::onConnect);
 }
 
 void LaneWindow::onConnect()

@@ -16,7 +16,7 @@ ConsoleInput::ConsoleInput(QObject *parent)
 void ConsoleInput::start()
 {
     QTimer *t = new QTimer(this);
-    connect(t, SIGNAL(timeout()), this, SLOT(poll()));
+    connect(t, &QTimer::timeout, this, &ConsoleInput::poll);
     t->start(40);
 }
 
