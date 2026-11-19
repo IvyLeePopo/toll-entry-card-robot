@@ -5,7 +5,8 @@ TARGET   = LaneCtl
 TEMPLATE = app
 
 # W1: 并发基础件已抽到 lane_core (不依赖 Qt), W4 会把它做成独立静态库
-CONFIG += c++14
+# C++17: ThreadPool 用了 std::invoke_result_t
+CONFIG += c++17
 
 CORE = $$PWD/../lane_core
 INCLUDEPATH += $$CORE

@@ -285,7 +285,7 @@ Select-String -Path lanectl\*.cpp,lanectl\*.h,lanesim\*.cpp,lanesim\*.h -Pattern
 ### W1 现代 C++ / 并发 —— ✅ 已完成（标签 `w1-done`）
 
 - [x] 自管对象全部换成 `std::unique_ptr`（`m_pool` / `m_tracker`），删掉手工 `char[512]` 缓冲与 `StatusPoller`
-- [x] 不依赖 Qt 的线程池：`lane_core/ThreadPool`（`std::thread` + `mutex` + `condition_variable` + `atomic` + `packaged_task`）
+- [x] 不依赖 Qt 的线程池：`lane_core/ThreadPool`（`std::thread` + `mutex` + `condition_variable` + `atomic` + `packaged_task`），返回类型用 C++17 的 `std::invoke_result_t`（`std::result_of` 在 C++17 已废弃、C++20 移除）
 - [x] 「发命令 + 等 B1 + 超时」抽成异步任务：`lane_core/CommandTracker`（`promise/future`），每条命令独立计时，结果经 `QMetaObject::invokeMethod` 回到 UI 线程
 - [x] 全项目信号槽改为新式写法 `connect(&QTcpSocket::readyRead, this, &LaneWindow::onReadyRead)`，签名写错编译期就报错（`error` 是重载信号，用 `QOverload` 指定）
 - [x] Logger 加锁 + 四级（D/I/W/E）+ 有界队列（4096）+ 后台线程落盘 + 日志文件改 UTF-8

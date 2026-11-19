@@ -12,7 +12,9 @@
 //  设计要点:
 //    * std::thread + std::mutex + std::condition_variable + std::atomic
 //    * submit 用 packaged_task 包任务, 调用方拿 future 取结果/异常
-//    * shutdown 后队列里的任务会被丢弃 (不保证执行), 析构时自动 join
+//    * 需要 C++17 (std::invoke_result_t)
+//    * shutdown 会先把队列里剩下的任务执行完, 再 join 所有线程
+//      (所以如果有任务卡在 wait_for 里, 析构最多会等它超时)
 // ============================================================================
 
 #include <atomic>
@@ -37,10 +39,12 @@ public:
     ThreadPool &operator=(const ThreadPool &) = delete;
 
     template <typename F>
-    std::future<typename std::decay<typename std::result_of<F()>::type>::type>
+    std::future<std::decay_t<std::invoke_result_t<F &>>>
     submit(F &&f)
     {
-        using R = typename std::result_of<F()>::type;
+        // F& 而不是 F: 任务在队列里是以左值形式被调用的 (task()),
+        // 这样对 && 限定的调用运算符也能推导正确
+        using R = std::decay_t<std::invoke_result_t<F &>>;
 
         auto task = std::make_shared<std::packaged_task<R()>>(std::forward<F>(f));
         std::future<R> fut = task->get_future();

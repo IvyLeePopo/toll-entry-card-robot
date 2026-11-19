@@ -3,7 +3,7 @@ TEMPLATE = app
 TARGET   = lane_core_test
 
 # 纯 C++ 验收程序, 不链接 Qt
-CONFIG += console c++14
+CONFIG += console c++17
 CONFIG -= qt
 
 CORE = $$PWD/../../lane_core
